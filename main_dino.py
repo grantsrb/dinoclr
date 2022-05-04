@@ -47,6 +47,13 @@ def get_args_parser():
                 + torchvision_archs + torch.hub.list("facebookresearch/xcit:main"),
         help="""Name of architecture to train. For quick experiments with ViTs,
         we recommend using vit_tiny or vit_small.""")
+    parser.add_argument('--n_cnns', default=2, type=int, help="""number
+        individual cnns that make up the larger tree""")
+    parser.add_argument('--chans', nargs="+", default=[8,12,16,20],
+        help="""the channel depths of each cnn""")
+    parser.add_argument('--ksizes', default=2, type=int)
+    parser.add_argument('--paddings', default=0, type=int)
+    parser.add_argument('--strides', default=1, type=int)
     parser.add_argument('--patch_size', default=16, type=int, help="""Size in pixels
         of input square patches - default 16 (for 16x16 patches). Using smaller
         values leads to better performance but requires more memory. Applies only
@@ -165,6 +172,10 @@ def train_dino(args):
         )
         teacher = vits.__dict__[args.arch](patch_size=args.patch_size)
         embed_dim = student.embed_dim
+    elif args.arch in models.__dict__.keys():
+        student = models.__dict__[args.arch](**args.model_params)
+        teacher = models.__dict__[args.arch](**args.model_params)
+        embed_dim = student.outp_dim
     # if the network is a XCiT
     elif args.arch in torch.hub.list("facebookresearch/xcit:main"):
         student = torch.hub.load('facebookresearch/xcit:main', args.arch,
