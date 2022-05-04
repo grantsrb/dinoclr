@@ -34,6 +34,8 @@ import utils
 import vision_transformer as vits
 from vision_transformer import DINOHead
 
+import models
+
 torchvision_archs = sorted(name for name in torchvision_models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(torchvision_models.__dict__[name]))
@@ -43,17 +45,20 @@ def get_args_parser():
 
     # Model parameters
     parser.add_argument('--arch', default='vit_small', type=str,
-        choices=['vit_tiny', 'vit_small', 'vit_base', 'xcit', 'deit_tiny', 'deit_small'] \
+        choices=['TreeCNN', 'vit_tiny', 'vit_small', 'vit_base',
+                'xcit', 'deit_tiny', 'deit_small'] \
                 + torchvision_archs + torch.hub.list("facebookresearch/xcit:main"),
         help="""Name of architecture to train. For quick experiments with ViTs,
         we recommend using vit_tiny or vit_small.""")
     parser.add_argument('--n_cnns', default=2, type=int, help="""number
         individual cnns that make up the larger tree""")
-    parser.add_argument('--chans', nargs="+", default=[8,12,16,20],
+    parser.add_argument('--chans', nargs="+", default=[8,12,16],
         help="""the channel depths of each cnn""")
     parser.add_argument('--ksizes', default=2, type=int)
     parser.add_argument('--paddings', default=0, type=int)
-    parser.add_argument('--strides', default=1, type=int)
+    parser.add_argument('--strides', default=2, type=int)
+    parser.add_argument('--lnorm', default=True, type=bool)
+    parser.add_argument('--h_size', default=64, type=int)
     parser.add_argument('--patch_size', default=16, type=int, help="""Size in pixels
         of input square patches - default 16 (for 16x16 patches). Using smaller
         values leads to better performance but requires more memory. Applies only
@@ -144,12 +149,19 @@ def train_dino(args):
     cudnn.benchmark = True
 
     # ============ preparing data ... ============
+    img_shape = (3,224,224) if "cifar" not in args.data_path.lower() else (3,32,32)
     transform = DataAugmentationDINO(
         args.global_crops_scale,
         args.local_crops_scale,
         args.local_crops_number,
+        img_shape=img_shape
     )
-    dataset = datasets.ImageFolder(args.data_path, transform=transform)
+    if "cifar100" in args.data_path.lower():
+        dataset = datasets.CIFAR100(root=args.data_path, train=True, transform=transform)
+    elif "cifar10" in args.data_path.lower():
+        dataset = datasets.CIFAR10(root=args.data_path, train=True, transform=transform)
+    else:
+        dataset = datasets.ImageFolder(args.data_path, transform=transform)
     sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
     data_loader = torch.utils.data.DataLoader(
         dataset,
@@ -173,9 +185,19 @@ def train_dino(args):
         teacher = vits.__dict__[args.arch](patch_size=args.patch_size)
         embed_dim = student.embed_dim
     elif args.arch in models.__dict__.keys():
-        student = models.__dict__[args.arch](**args.model_params)
-        teacher = models.__dict__[args.arch](**args.model_params)
-        embed_dim = student.outp_dim
+        kwgs = {
+            "n_cnns": args.n_cnns,
+            "inpt_shape": (3,32,32),
+            "chans": args.chans,
+            "ksizes": args.ksizes,
+            "strides": args.strides,
+            "paddings": args.paddings,
+            "lnorm": args.lnorm,
+            "out_dim": args.out_dim
+        }
+        student = models.__dict__[args.arch](**kwgs)
+        teacher = models.__dict__[args.arch](**kwgs)
+        embed_dim = student.out_dim
     # if the network is a XCiT
     elif args.arch in torch.hub.list("facebookresearch/xcit:main"):
         student = torch.hub.load('facebookresearch/xcit:main', args.arch,
@@ -428,7 +450,7 @@ class DINOLoss(nn.Module):
 
 
 class DataAugmentationDINO(object):
-    def __init__(self, global_crops_scale, local_crops_scale, local_crops_number):
+    def __init__(self, global_crops_scale, local_crops_scale, local_crops_number, img_shape=(3,224,224)):
         flip_and_color_jitter = transforms.Compose([
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomApply(
@@ -444,14 +466,14 @@ class DataAugmentationDINO(object):
 
         # first global crop
         self.global_transfo1 = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
+            transforms.RandomResizedCrop(img_shape[1], scale=global_crops_scale, interpolation=Image.BICUBIC),
             flip_and_color_jitter,
             utils.GaussianBlur(1.0),
             normalize,
         ])
         # second global crop
         self.global_transfo2 = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=global_crops_scale, interpolation=Image.BICUBIC),
+            transforms.RandomResizedCrop(img_shape[1], scale=global_crops_scale, interpolation=Image.BICUBIC),
             flip_and_color_jitter,
             utils.GaussianBlur(0.1),
             utils.Solarization(0.2),
@@ -460,7 +482,7 @@ class DataAugmentationDINO(object):
         # transformation for the local small crops
         self.local_crops_number = local_crops_number
         self.local_transfo = transforms.Compose([
-            transforms.RandomResizedCrop(96, scale=local_crops_scale, interpolation=Image.BICUBIC),
+            transforms.RandomResizedCrop(int(3/7*img_shape[1]), scale=local_crops_scale, interpolation=Image.BICUBIC),
             flip_and_color_jitter,
             utils.GaussianBlur(p=0.5),
             normalize,

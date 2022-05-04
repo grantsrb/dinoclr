@@ -18,6 +18,8 @@ from functools import partial
 import torch
 import torch.nn as nn
 
+import numpy as np
+
 from utils import trunc_normal_
 
 def update_shape(shape, kernel=3, padding=0, stride=1, op="conv"):
@@ -51,7 +53,7 @@ def update_shape(shape, kernel=3, padding=0, stride=1, op="conv"):
         heightwidth = (heightwidth - kernel + 2*padding)/stride + 1
     elif op == "deconv" or op == "conv_transpose":
         heightwidth = (heightwidth - 1)*stride + kernel - 2*padding
-    return tuple(heightwidth)
+    return tuple([int(x) for x in heightwidth])
 
 
 class Flatten(nn.Module):
@@ -66,6 +68,23 @@ class Flatten(nn.Module):
         return x.view(x.shape[0], -1)
 
 
+class Reshape(nn.Module):
+    """
+    Reshapes the activations to be of the argued shape
+    """
+    def __init__(self, shape):
+        super().__init__()
+        """
+        Args:
+            shape: tuple of ints
+                the shape should ignore the batch dimension
+        """
+        self.shape = shape
+
+    def forward(self, x):
+        return x.reshape(len(x),*self.shape)
+
+
 def conv_block(chan_in: int,
                chan_out: int,
                ksize: int=2,
@@ -73,7 +92,7 @@ def conv_block(chan_in: int,
                padding: int=0,
                lnorm: bool=True,
                shape: tuple=None,
-               actv_layer=nn.GELU,
+               actv_layer=nn.ReLU,
                drop: float=0):
     """
     Args:
@@ -89,7 +108,7 @@ def conv_block(chan_in: int,
     """
     modules = []
     if lnorm:
-        modules.append( nn.LayerNorm(shape) )
+        modules.append( nn.GroupNorm(1,chan_in) )
     modules.append( nn.Conv2d(
         chan_in,
         chan_out,
@@ -97,10 +116,10 @@ def conv_block(chan_in: int,
         stride=stride,
         padding=padding
     ))
-    torch.nn.init.kaiming_normal_(modules[-1].weight,nonlinearity='gelu')
+    torch.nn.init.xavier_uniform_(modules[-1].weight)
     if drop > 0:
         modules.append( nn.Dropout(drop) )
-    modules.append( actv_layer )
+    modules.append( actv_layer() )
     return nn.Sequential( *modules )
 
 
@@ -111,10 +130,12 @@ class CNN(nn.Module):
                        strides=1,
                        paddings=0,
                        lnorm=True,
-                       outp_dim=64,
-                       actv_layer=nn.GELU,
+                       out_dim=64,
+                       actv_layer=nn.ReLU,
                        drop=0.,
                        n_outlayers=1,
+                       h_size=128,
+                       output_type="gapooling",
                        *args, **kwargs):
         """
         Simple CNN architecture
@@ -129,17 +150,26 @@ class CNN(nn.Module):
             paddings: int or list of ints
                 if single int, will use as padding for all layers.
             lnorm: bool
-            outp_dim: int
+            out_dim: int
             actv_layer: torch module
             drop: float
                 the probability to drop a node in the network
             n_outlayers: int
                 the number of dense layers following the convolutional
                 features
+            h_size: int
+            output_type: str
+                a string indicating what type of output should be used.
+
+                options: 
+                    'gapooling': global average pooling 
+                    None: simply flattens features
         """
         super().__init__()
         self.inpt_shape = inpt_shape
-        self.outp_dim = outp_dim
+        self.out_dim = out_dim
+        self.h_size = h_size
+        self.n_outlayers = n_outlayers
         self.chans = [inpt_shape[0], *chans]
         self.ksizes = ksizes
         if isinstance(ksizes, int):
@@ -153,9 +183,10 @@ class CNN(nn.Module):
         self.lnorm = lnorm
         self.actv_layer = actv_layer
         self.drop = drop
+        self.output_type = output_type.lower()
 
         # Conv Layers
-        self.shapes = [ inpt_shape[1:] ]
+        self.shapes = [ inpt_shape[-2:] ]
         modules = []
         for i in range(len(chans)):
             modules.append( conv_block(
@@ -166,7 +197,7 @@ class CNN(nn.Module):
                 padding=self.paddings[i],
                 actv_layer=self.actv_layer,
                 lnorm=self.lnorm and i!=0,
-                shape=self.shapes[-1],
+                shape=tuple([int(s) for s in self.shapes[-1]]),
                 drop=self.drop
             ))
             self.shapes.append( update_shape(
@@ -178,20 +209,26 @@ class CNN(nn.Module):
         self.features = nn.Sequential( *modules )
 
         # Dense Layers
-        self.flat_dim = int(self.chans[-1]*math.prod(self.shapes[-1]))
-        modules = [ Flatten() ]
+        modules = []
+        if self.output_type == "gapooling":
+            modules.append( Reshape((self.chans[-1],-1)) )
+            modules.append( AvgOverDim(-1) )
+            self.flat_dim = self.chans[-1]
+        else:
+            self.flat_dim = int(self.chans[-1]*math.prod(self.shapes[-1]))
+        modules.append( Flatten() )
         in_dim = self.flat_dim
         out_dim = self.h_size
         for i in range(self.n_outlayers):
-            if i+1 == self.n_outlayers: out_dim = self.outp_dim
+            if i+1 == self.n_outlayers: out_dim = self.out_dim
             modules.append( nn.LayerNorm(in_dim) )
+            modules.append( nn.Linear(in_dim, out_dim) )
             torch.nn.init.kaiming_normal_(
                 modules[-1].weight,
-                nonlinearity='gelu'
+                nonlinearity='relu'
             )
-            modules.append( nn.Linear(in_dim, out_dim) )
             if i+1 < self.n_outlayers:
-                modules.append( self.actv_layer )
+                modules.append( self.actv_layer() )
             in_dim = self.h_size
         self.dense = nn.Sequential( *modules )
         self.net = nn.Sequential(self.features, self.dense)
@@ -226,15 +263,18 @@ class TreeCNN(nn.Module):
             paddings: int or list of ints
                 if single int, will use as padding for all layers.
             lnorm: bool
-            outp_dim: int
+            out_dim: int
                 the output dimensionality of each CNN and the whole
                 TreeCNN
             actv_layer: torch module
             drop: float
                 the probability to drop a node in the network
+            h_size: int
+                hidden dim of dense layers in cnn final layers
         """
         super().__init__()
         self.n_cnns = n_cnns
+        self.out_dim = kwargs["out_dim"]
         self.cnns = nn.ModuleList([])
         for n in range(n_cnns):
             self.cnns.append( CNN(**kwargs) )
@@ -260,7 +300,7 @@ class AvgOverDim(nn.Module):
     """
     Averages over the specified dimension
     """
-    def __init__(self, dim=1):
+    def __init__(self, dim=1, *args, **kwargs):
         super().__init__()
         self.dim = dim
 
@@ -276,7 +316,7 @@ class AvgOverDim(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., *args, **kwargs):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -303,11 +343,11 @@ class Attention(nn.Module):
 
 
 class AttentionalJoin(nn.Module):
-    def __init__(self, outp_dim, *args, **kwargs):
+    def __init__(self, out_dim, *args, **kwargs):
         super().__init__()
-        self.dim = outp_dim
-        self.attn = Attention(dim=outp_dim, *args, **kwargs)
-        self.cls = nn.Parameter(torch.zeros(1,1,outp_dim))
+        self.dim = out_dim
+        self.attn = Attention(dim=out_dim, *args, **kwargs)
+        self.cls = nn.Parameter(torch.zeros(1,1,out_dim))
 
     def forward(self, x):
         """
@@ -325,7 +365,7 @@ class AttentionalJoin(nn.Module):
 
 class Block(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+                 drop_path=0., act_layer=nn.ReLU, norm_layer=nn.LayerNorm):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = Attention(
@@ -495,12 +535,12 @@ class DINOHead(nn.Module):
             layers = [nn.Linear(in_dim, hidden_dim)]
             if use_bn:
                 layers.append(nn.BatchNorm1d(hidden_dim))
-            layers.append(nn.GELU())
+            layers.append(nn.ReLU())
             for _ in range(nlayers - 2):
                 layers.append(nn.Linear(hidden_dim, hidden_dim))
                 if use_bn:
                     layers.append(nn.BatchNorm1d(hidden_dim))
-                layers.append(nn.GELU())
+                layers.append(nn.ReLU())
             layers.append(nn.Linear(hidden_dim, bottleneck_dim))
             self.mlp = nn.Sequential(*layers)
         self.apply(self._init_weights)
