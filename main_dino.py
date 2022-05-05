@@ -147,6 +147,7 @@ def train_dino(args):
     print("git:\n  {}\n".format(utils.get_sha()))
     print("\n".join("%s: %s" % (k, str(v)) for k, v in sorted(dict(vars(args)).items())))
     cudnn.benchmark = True
+    args.chans = [int(c) for c in args.chans]
 
     # ============ preparing data ... ============
     img_shape = (3,224,224) if "cifar" not in args.data_path.lower() else (3,32,32)
