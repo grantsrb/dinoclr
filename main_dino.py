@@ -131,7 +131,9 @@ def get_args_parser():
     # Misc
     parser.add_argument('--data_path', default='/path/to/imagenet/train/', type=str,
         help='Please specify path to the ImageNet training data.')
-    parser.add_argument('--output_dir', default=".", type=str, help='Path to save logs and checkpoints.')
+    #parser.add_argument('--output_dir', default=".", type=str, help='Path to save logs and checkpoints.')
+    parser.add_argument('--save_root', default="./", type=str, help='Root path to save logs and checkpoints.')
+    parser.add_argument('--exp_name', default="myexperiment", type=str, help='Path to save logs and checkpoints.')
     parser.add_argument('--saveckp_freq', default=20, type=int, help='Save checkpoint every x epochs.')
     parser.add_argument('--seed', default=0, type=int, help='Random seed.')
     parser.add_argument('--num_workers', default=10, type=int, help='Number of data loading workers per GPU.')
@@ -178,19 +180,20 @@ def train_dino(args):
     # we changed the name DeiT-S for ViT-S to avoid confusions
     args.arch = args.arch.replace("deit", "vit")
     # if the network is a Vision Transformer (i.e. vit_tiny, vit_small, vit_base)
+    hyps = {}
     if args.arch in vits.__dict__.keys():
+        hyps = {
+            "patch_size": args.patch_size,
+            "img_size": [img_shape[1]]
+        }
         student = vits.__dict__[args.arch](
-            patch_size=args.patch_size,
+            **hyps,
             drop_path_rate=args.drop_path_rate,  # stochastic depth
-            img_size=[img_shape[1]]
         )
-        teacher = vits.__dict__[args.arch](
-            patch_size=args.patch_size, 
-            img_size=[img_shape[1]]
-        )
+        teacher = vits.__dict__[args.arch]( **hyps )
         embed_dim = student.embed_dim
     elif args.arch in models.__dict__.keys():
-        kwgs = {
+        hyps = {
             "n_cnns": args.n_cnns,
             "inpt_shape": img_shape,
             "chans": args.chans,
@@ -198,10 +201,11 @@ def train_dino(args):
             "strides": args.strides,
             "paddings": args.paddings,
             "lnorm": args.lnorm,
+            "h_size": args.h_size,
             "out_dim": args.out_dim
         }
-        student = models.__dict__[args.arch](**kwgs)
-        teacher = models.__dict__[args.arch](**kwgs)
+        student = models.__dict__[args.arch](**hyps)
+        teacher = models.__dict__[args.arch](**hyps)
         embed_dim = student.out_dim
     # if the network is a XCiT
     elif args.arch in torch.hub.list("facebookresearch/xcit:main"):
@@ -320,6 +324,7 @@ def train_dino(args):
             'epoch': epoch + 1,
             'args': args,
             'dino_loss': dino_loss.state_dict(),
+            "hyps": hyps
         }
         if fp16_scaler is not None:
             save_dict['fp16_scaler'] = fp16_scaler.state_dict()
@@ -505,5 +510,6 @@ class DataAugmentationDINO(object):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DINO', parents=[get_args_parser()])
     args = parser.parse_args()
+    args.output_dir = os.path.join(args.save_root, args.exp_name)
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     train_dino(args)
