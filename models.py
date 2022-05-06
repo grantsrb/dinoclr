@@ -303,6 +303,7 @@ class TreeCNN(nn.Module):
         for n in range(n_cnns):
             self.cnns.append( CNN(**kwargs) )
         self.join_fxn = globals()[join_fxn](**kwargs)
+        self.leaf_idx = None
 
     def forward(self, x):
         """
@@ -313,8 +314,11 @@ class TreeCNN(nn.Module):
             outps: torch FloatTensor (B, D)
         """
         outps = []
-        for cnn in self.cnns:
-            outps.append( cnn(x) )
+        if self.leaf_idx is not None:
+            outps.append( self.cnns[self.leaf_idx](x) )
+        else:
+            for cnn in self.cnns:
+                outps.append( cnn(x) )
         outps = torch.stack(outps, dim=1)
         self.outps = outps
         return self.join_fxn( outps )
