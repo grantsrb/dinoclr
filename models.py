@@ -68,6 +68,14 @@ class Flatten(nn.Module):
         return x.view(x.shape[0], -1)
 
 
+class NullOp(nn.Module):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+
+    def forward(self, x):
+        return x
+
+
 class Transpose(nn.Module):
     """
     Transposes the activations to be of the argued dimension order.
@@ -154,6 +162,7 @@ class CNN(nn.Module):
                        n_outlayers=1,
                        h_size=128,
                        output_type="gapooling",
+                       is_base=False,
                        *args, **kwargs):
         """
         Simple CNN architecture
@@ -176,6 +185,9 @@ class CNN(nn.Module):
                 the number of dense layers following the convolutional
                 features
             h_size: int
+            is_base: bool
+                if true, striding is not manipulated and fc layers
+                are skipped
             output_type: str
                 a string indicating what type of output should be used.
 
@@ -195,6 +207,9 @@ class CNN(nn.Module):
         self.strides = strides
         if isinstance(strides, int):
             self.strides = [strides for i in range(len(chans))]
+            if self.inpt_shape[1] > 32 and not is_base:
+                for i in range(min(len(self.strides), 3)):
+                    self.strides[-i] = 2
         self.paddings = paddings
         if isinstance(paddings, int):
             self.paddings = [paddings for i in range(len(chans))]
@@ -226,6 +241,7 @@ class CNN(nn.Module):
             ))
         self.features = nn.Sequential( *modules )
 
+        if is_base: return
         # Dense Layers
         modules = []
         if self.output_type == "gapooling":
@@ -270,7 +286,10 @@ class CNN(nn.Module):
 
 
 class TreeCNN(nn.Module):
-    def __init__(self, n_cnns=1, join_fxn="AvgOverDim", **kwargs):
+    def __init__(self, n_cnns=1,
+                       agg_fxn="AvgOverDim",
+                       share_base=False,
+                       **kwargs):
         """
         This model architecture resembles a tree structure in which
         multiple small CNNs feed into a final layer.
@@ -278,6 +297,8 @@ class TreeCNN(nn.Module):
         Args:
             n_cnns: int
                 the number of individual CNN networks to instantiate.
+            agg_fxn: str
+                the function used to combine the leaf cnns
             inpt_shape: tuple of ints
             chans: list of ints
             ksizes: int or list of ints
@@ -297,12 +318,24 @@ class TreeCNN(nn.Module):
                 hidden dim of dense layers in cnn final layers
         """
         super().__init__()
+        self.share_base = share_base
         self.n_cnns = n_cnns
         self.out_dim = kwargs["out_dim"]
+        self.base = NullOp()
+        if self.share_base:
+            kwgs = {
+                **kwargs,
+                "chans":kwargs["chans"][:2],
+                "is_base": True
+            }
+            cnn = CNN(**kwgs)
+            self.base = cnn.features
+            kwargs["inpt_shape"] = [kwgs["chans"][-1], *cnn.shapes[-1]]
         self.cnns = nn.ModuleList([])
         for n in range(n_cnns):
             self.cnns.append( CNN(**kwargs) )
-        self.join_fxn = globals()[join_fxn](**kwargs)
+        self.agg_fxn_str = agg_fxn
+        self.agg_fxn = globals()[agg_fxn](**kwargs)
         self.leaf_idx = None
 
     def forward(self, x):
@@ -313,15 +346,22 @@ class TreeCNN(nn.Module):
             joined_outps: torch FloatTensor (B, D)
             outps: torch FloatTensor (B, D)
         """
+        x = self.base(x)
         outps = []
         if self.leaf_idx is not None:
             outps.append( self.cnns[self.leaf_idx](x) )
+        elif self.agg_fxn_str == "AvgOverDim":
+            p = 1/self.n_cnns
+            outpt = self.cnns[0](x)
+            for cnn in self.cnns[1:]:
+                outpt += cnn(x)
+            return p*outpt
         else:
             for cnn in self.cnns:
                 outps.append( cnn(x) )
         outps = torch.stack(outps, dim=1)
         self.outps = outps
-        return self.join_fxn( outps )
+        return self.agg_fxn( outps )
 
 
 class AvgOverDim(nn.Module):
@@ -394,11 +434,12 @@ class AttentionalJoin(nn.Module):
             fx: torch FloatTensor (B,D)
                 the attended values
         """
-        cls = self.cls.repeat(len(x), 1, 1)
-        x = torch.cat([cls,x], dim=1)
+        B,N,D = x.shape
+        cls = self.cls.repeat(B,1,1)
+        x = torch.cat([cls,x], dim=-2)
         if self.pos_enc: x = self.pos_enc(x)
         fx,_ = self.attn(x)
-        return fx[:,0]
+        return fx[...,0,:]
 
 
 class PositionalEncoding(nn.Module):
@@ -427,13 +468,50 @@ class PositionalEncoding(nn.Module):
     def forward(self, x):
         """
         Args:
-            x: Tensor, shape [batch_size, seq_len, embedding_dim]
+            x: Tensor, shape [..., seq_len, embedding_dim]
         Returns:
-            enc: Tensor, shape [batch_size, seq_len, embedding_dim]
+            enc: Tensor, shape [..., seq_len, embedding_dim]
         """
         pe = self.pe
-        if x.size(1) > self.pe.shape[1]:
-            pe = self.get_pe(self.d_model, x.size(1))
-        x = x + pe[:,:x.size(1)]
+        if x.size(-2) > self.pe.shape[-2]:
+            pe = self.get_pe(self.d_model, x.size(-2))
+        x = x + pe[:,:x.size(-2)]
         return self.dropout(x)
+
+class RecurrentAttention(nn.Module):
+    """
+    Applies attention over every k entries to extract features and then
+    repeats with the outputs of that step (N//k fewer inputs in the 2nd
+    step). Repeats until only 1 output is left which is returned.
+    """
+    def __init__(self, out_dim, seq_len=4, pos_enc=False, *args, **kwargs):
+        super().__init__()
+        self.dim = out_dim
+        self.seq_len = seq_len
+        self.attn_join = AttentionalJoin(out_dim, pos_enc, *args, **kwargs)
+        self.edge = nn.Parameter(torch.zeros(1,1,out_dim))
+
+    def forward(self, x):
+        """
+        Args:
+            x: torch FloatTensor (B,N,D)
+        Returns:
+            fx: torch FloatTensor (B,D)
+                the attended values
+        """
+        B,N,D = x.shape
+        fx = x
+        while fx.numel() > B*D:
+            mod = fx.shape[-2] % self.seq_len
+            if mod != 0:
+                shape = [1 for _ in range(len(fx.shape[:-1]))]
+                edge = self.edge.reshape(*shape, self.dim)
+                edge = edge.repeat(*fx.shape[:-2],mod,1)
+                fx = torch.cat([fx, edge], dim=-2)
+            fx = fx.reshape(-1,self.seq_len,D)
+            fx = self.attn_join(fx)
+            fx = fx.reshape(B,-1,D)
+        return fx.reshape(B,D)
+
+
 
