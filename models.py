@@ -390,15 +390,18 @@ class Attention(nn.Module):
         head_dim = dim // num_heads
         self.scale = qk_scale or head_dim ** -0.5
 
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.kv_w = nn.Linear(dim, dim * 2, bias=qkv_bias)
+        self.q_w = nn.Linear(dim, dim, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x):
+    def forward(self, q, x):
         B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]
+        kv = self.kv_w(x).reshape(B, N, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        k, v = kv[0], kv[1]
+        q = self.q_w(q).reshape(B, N, 1, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        q = q[0]
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
@@ -415,11 +418,12 @@ class AttentionalJoin(nn.Module):
     Uses a CLS token to extract features using attention from a sequence
     of vectors.
     """
-    def __init__(self, out_dim, pos_enc=False, *args, **kwargs):
+    def __init__(self, out_dim, pos_enc=False, cls=True, *args, **kwargs):
         super().__init__()
         self.dim = out_dim
         self.attn = Attention(dim=out_dim, *args, **kwargs)
-        self.cls = nn.Parameter(torch.zeros(1,1,out_dim))
+        self.cls = None
+        if cls: self.cls = nn.Parameter(torch.zeros(1,1,out_dim))
         self.pos_enc = pos_enc
         if self.pos_enc:
             self.pos_enc = PositionalEncoding(
@@ -435,11 +439,14 @@ class AttentionalJoin(nn.Module):
                 the attended values
         """
         B,N,D = x.shape
-        cls = self.cls.repeat(B,1,1)
-        x = torch.cat([cls,x], dim=-2)
         if self.pos_enc: x = self.pos_enc(x)
-        fx,_ = self.attn(x)
-        return fx[...,0,:]
+        if self.cls not None:
+            cls = self.cls.repeat(B,1,1)
+            fx,_ = self.attn(cls, x)
+            return fx[...,0,:]
+        else:
+            fx,_ = self.attn(x, x)
+            return fx.mean(-2)
 
 
 class PositionalEncoding(nn.Module):
@@ -478,17 +485,18 @@ class PositionalEncoding(nn.Module):
         x = x + pe[:,:x.size(-2)]
         return self.dropout(x)
 
+
 class RecurrentAttention(nn.Module):
     """
     Applies attention over every k entries to extract features and then
     repeats with the outputs of that step (N//k fewer inputs in the 2nd
     step). Repeats until only 1 output is left which is returned.
     """
-    def __init__(self, out_dim, seq_len=4, pos_enc=False, *args, **kwargs):
+    def __init__(self, out_dim, seq_len=4, pos_enc=False, cls=True, *args, **kwargs):
         super().__init__()
         self.dim = out_dim
         self.seq_len = seq_len
-        self.attn_join = AttentionalJoin(out_dim, pos_enc, *args, **kwargs)
+        self.attn_join = AttentionalJoin(out_dim, pos_enc,cls=cls, **kwargs)
         self.edge = nn.Parameter(torch.zeros(1,1,out_dim))
 
     def forward(self, x):
