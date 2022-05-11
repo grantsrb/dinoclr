@@ -59,6 +59,9 @@ def get_args_parser():
     parser.add_argument('--strides', default=2, type=int)
     parser.add_argument('--lnorm', default="True", type=str)
     parser.add_argument('--h_size', default=64, type=int)
+    parser.add_argument('--output_type', default="gapooling", type=str,
+        choices=['gapooling', "alt_attn", "attention"],
+        help="""the feature aggregation function for the leaf cnns""")
     parser.add_argument('--seq_len', default=4, type=int,
         help="""the sequence length for recurrent attention agg fxn""")
     parser.add_argument('--cls', default="True", type=str,
@@ -219,6 +222,7 @@ def train_dino(args):
             "share_base": args.share_base,
             "seq_len": args.seq_len,
             "cls": args.cls,
+            "output_type": args.output_type
         }
         student = models.__dict__[args.arch](**hyps)
         teacher = models.__dict__[args.arch](**hyps)

@@ -163,6 +163,7 @@ class CNN(nn.Module):
                        h_size=128,
                        output_type="gapooling",
                        is_base=False,
+                       cls=True,
                        *args, **kwargs):
         """
         Simple CNN architecture
@@ -194,6 +195,8 @@ class CNN(nn.Module):
                 options: 
                     'gapooling': global average pooling 
                     None: simply flattens features
+                    "attention": attentional join
+                    "alt_attn": alternating attention
         """
         super().__init__()
         self.inpt_shape = inpt_shape
@@ -248,16 +251,24 @@ class CNN(nn.Module):
             modules.append( Reshape((self.chans[-1],-1)) )
             modules.append( AvgOverDim(-1) )
             self.flat_dim = self.chans[-1]
+            in_dim = self.flat_dim
         elif self.output_type == "attention":
             modules.append( Reshape((self.chans[-1], -1)) )
             modules.append( Transpose((0,2,1)) )
             modules.append( AttentionalJoin(
                 out_dim=self.chans[-1]), pos_enc=False
             )
+            in_dim = self.chans[-1]
+        elif self.output_type == "alt_attn":
+            modules.append( Transpose((0,2,3,1)) )
+            modules.append( AlternatingAttention(
+                out_dim=self.chans[-1], seq_len=4, cls=cls
+            ))
+            in_dim = self.chans[-1]
         else:
             self.flat_dim = int(self.chans[-1]*math.prod(self.shapes[-1]))
+            in_dim = self.flat_dim
         modules.append( Flatten() )
-        in_dim = self.flat_dim
         out_dim = self.h_size
         for i in range(self.n_outlayers):
             if i+1 == self.n_outlayers: out_dim = self.out_dim
@@ -316,6 +327,8 @@ class TreeCNN(nn.Module):
                 the probability to drop a node in the network
             h_size: int
                 hidden dim of dense layers in cnn final layers
+            output_type: str
+                method for consolidating and outputting cnn activations
         """
         super().__init__()
         self.share_base = share_base
@@ -397,17 +410,18 @@ class Attention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, q, x):
+        B, M, C = q.shape
         B, N, C = x.shape
         kv = self.kv_w(x).reshape(B, N, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         k, v = kv[0], kv[1]
-        q = self.q_w(q).reshape(B, N, 1, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        q = self.q_w(q).reshape(B, M, 1, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q = q[0]
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = (attn @ v).transpose(1, 2).reshape(B, M, C)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x, attn
@@ -426,9 +440,7 @@ class AttentionalJoin(nn.Module):
         if cls: self.cls = nn.Parameter(torch.zeros(1,1,out_dim))
         self.pos_enc = pos_enc
         if self.pos_enc:
-            self.pos_enc = PositionalEncoding(
-                d_model=out_dim, max_len=5000
-            )
+            self.pos_enc = PositionalEncoding( d_model=out_dim, max_len=5000 )
 
     def forward(self, x):
         """
@@ -440,7 +452,7 @@ class AttentionalJoin(nn.Module):
         """
         B,N,D = x.shape
         if self.pos_enc: x = self.pos_enc(x)
-        if self.cls not None:
+        if self.cls is not None:
             cls = self.cls.repeat(B,1,1)
             fx,_ = self.attn(cls, x)
             return fx[...,0,:]
@@ -462,7 +474,7 @@ class PositionalEncoding(nn.Module):
         pe = self.get_pe(d_model, max_len)
         self.register_buffer('pe', pe)
 
-    def get_pe(d_model, max_len):
+    def get_pe(self, d_model, max_len):
         position = torch.arange(max_len).unsqueeze(1)
         div_term = torch.exp(
             torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model)
@@ -514,12 +526,58 @@ class RecurrentAttention(nn.Module):
             if mod != 0:
                 shape = [1 for _ in range(len(fx.shape[:-1]))]
                 edge = self.edge.reshape(*shape, self.dim)
-                edge = edge.repeat(*fx.shape[:-2],mod,1)
+                edge = edge.repeat(*fx.shape[:-2],self.seq_len-mod,1)
                 fx = torch.cat([fx, edge], dim=-2)
             fx = fx.reshape(-1,self.seq_len,D)
             fx = self.attn_join(fx)
             fx = fx.reshape(B,-1,D)
         return fx.reshape(B,D)
 
+
+class AlternatingAttention(nn.Module):
+    """
+    Alternates applying attention along rows and then along columns.
+    """
+    def __init__(self, out_dim,
+                       seq_len=4,
+                       cls=True,
+                       *args, **kwargs):
+        """
+        out_dim: int
+            the dimensionality of the inputs and attention module
+        seq_len: int
+            the number of elements to perform attention over
+        cls: bool
+            if true, each application of attention will yield a single
+            output token.
+        """
+        super().__init__()
+        self.dim = out_dim
+        self.seq_len = seq_len
+        self.attn_join = AttentionalJoin(out_dim, pos_enc=True, cls=cls, **kwargs)
+
+    def forward(self, x):
+        """
+        Args:
+            x: torch FloatTensor (B,H,W,D)
+        Returns:
+            fx: torch FloatTensor (B,D) or (B,H,W,D)
+                the attended values. will maintain
+        """
+        B,H,W,D = x.shape
+        fx = x
+        while fx.numel() > B*D:
+            mod = fx.shape[-2] % self.seq_len
+            if mod != 0:
+                pad_left = (self.seq_len-mod)//2
+                pad_right = pad_left + int((pad_left*2) != (self.seq_len-mod))
+                # Pads fx along W dim
+                fx = torch.nn.functional.pad(fx, (0,0,pad_left,pad_right))
+            H = fx.shape[-3]
+            W = fx.shape[-2]//self.seq_len
+            fx = fx.reshape(-1,self.seq_len,D)
+            fx = self.attn_join(fx)
+            fx = fx.reshape(B,H,W,D).permute(0,2,1,3)
+        return fx.reshape(B,D)
 
 
