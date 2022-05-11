@@ -59,11 +59,18 @@ def get_args_parser():
     parser.add_argument('--strides', default=2, type=int)
     parser.add_argument('--lnorm', default=True, type=bool)
     parser.add_argument('--h_size', default=64, type=int)
+    parser.add_argument('--share_base', default=False, type=bool,
+        help="""all cnns share the first 2 layers""")
+    parser.add_argument('--agg_fxn', default="AvgOverDim", type=str, 
+        choices=['AvgOverDim', 'AttentionalJoin', "RecurrentAttention"],
+        help="""The name of the aggregation function defined in models.py""")
     parser.add_argument('--patch_size', default=16, type=int, help="""Size in pixels
         of input square patches - default 16 (for 16x16 patches). Using smaller
         values leads to better performance but requires more memory. Applies only
         for ViTs (vit_tiny, vit_small and vit_base). If <16, we recommend disabling
         mixed precision training (--use_fp16 false) to avoid unstabilities.""")
+    parser.add_argument('--agg_dim', default=128, type=int, help="""Dimensionality of
+        the TreeCNN aggregation layer.""")
     parser.add_argument('--out_dim', default=65536, type=int, help="""Dimensionality of
         the DINO head output. For complex and large datasets large values (like 65k) work well.""")
     parser.add_argument('--norm_last_layer', default=True, type=utils.bool_flag,
@@ -202,11 +209,13 @@ def train_dino(args):
             "paddings": args.paddings,
             "lnorm": args.lnorm,
             "h_size": args.h_size,
-            "out_dim": args.out_dim
+            "agg_fxn": args.agg_fxn,
+            "out_dim": args.agg_dim,
+            "share_base": args.share_base,
         }
         student = models.__dict__[args.arch](**hyps)
         teacher = models.__dict__[args.arch](**hyps)
-        embed_dim = student.out_dim
+        embed_dim = args.agg_dim
     # if the network is a XCiT
     elif args.arch in torch.hub.list("facebookresearch/xcit:main"):
         student = torch.hub.load('facebookresearch/xcit:main', args.arch,
@@ -221,6 +230,10 @@ def train_dino(args):
     else:
         print(f"Unknow architecture: {args.arch}")
 
+    count = 0
+    for p in teacher.parameters():
+        count += math.prod(p.shape)
+    print("Parameter Count:", count)
     # multi-crop wrapper handles forward with inputs of different resolutions
     student = utils.MultiCropWrapper(student, DINOHead(
         embed_dim,
@@ -232,6 +245,19 @@ def train_dino(args):
         teacher,
         DINOHead(embed_dim, args.out_dim, args.use_bn_in_head),
     )
+
+    count = 0
+    for p in teacher.parameters():
+        count += math.prod(p.shape)
+    print("Parameter Count with DINO Head:", count)
+
+    with open(os.path.join(args.output_dir, "modelarch.txt"), "a") as f:
+        s = "\ngit:\n  {}\n\n".format(utils.get_sha())
+        s += "Teacher:\n"
+        s += str(teacher) + "\n\n"
+        s += "\n".join("%s: %s" % (k, str(v)) for k, v in sorted(dict(vars(args)).items()))
+        f.write(s)
+
     # move networks to gpu
     student, teacher = student.cuda(), teacher.cuda()
     # synchronize batch norms (if any)
