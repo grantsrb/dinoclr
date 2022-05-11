@@ -57,9 +57,14 @@ def get_args_parser():
     parser.add_argument('--ksizes', default=2, type=int)
     parser.add_argument('--paddings', default=0, type=int)
     parser.add_argument('--strides', default=2, type=int)
-    parser.add_argument('--lnorm', default=True, type=bool)
+    parser.add_argument('--lnorm', default="True", type=str)
     parser.add_argument('--h_size', default=64, type=int)
-    parser.add_argument('--share_base', default=False, type=bool,
+    parser.add_argument('--seq_len', default=4, type=int,
+        help="""the sequence length for recurrent attention agg fxn""")
+    parser.add_argument('--cls', default="True", type=str,
+        help="""the extraction method for attention aggregations. if
+        false, averages over joint self attn""")
+    parser.add_argument('--share_base', default="False", type=str,
         help="""all cnns share the first 2 layers""")
     parser.add_argument('--agg_fxn', default="AvgOverDim", type=str, 
         choices=['AvgOverDim', 'AttentionalJoin', "RecurrentAttention"],
@@ -212,6 +217,8 @@ def train_dino(args):
             "agg_fxn": args.agg_fxn,
             "out_dim": args.agg_dim,
             "share_base": args.share_base,
+            "seq_len": args.seq_len,
+            "cls": args.cls,
         }
         student = models.__dict__[args.arch](**hyps)
         teacher = models.__dict__[args.arch](**hyps)
@@ -536,6 +543,9 @@ class DataAugmentationDINO(object):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('DINO', parents=[get_args_parser()])
     args = parser.parse_args()
+    args.cls = True if args.cls.lower() == "true" or args.cls.lower() == "t" else False
+    args.share_base = True if args.share_base.lower() == "true" or args.share_base.lower() == "t" else False
+    args.lnorm = True if args.lnorm.lower() == "true" or args.lnorm.lower() == "t" else False
     args.output_dir = os.path.join(args.save_root, args.exp_name)
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     train_dino(args)
