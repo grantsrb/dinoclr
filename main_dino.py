@@ -132,6 +132,7 @@ def get_args_parser():
     parser.add_argument('--drop_path_rate', type=float, default=0.1, help="stochastic depth rate")
 
     # Multi-crop parameters
+    parser.add_argument('--img_shape', type=int, nargs="+", default=[])
     parser.add_argument('--global_crops_scale', type=float, nargs='+', default=(0.4, 1.),
         help="""Scale range of the cropped image before resizing, relatively to the origin image.
         Used for large global view cropping. When disabling multi-crop (--local_crops_number 0), we
@@ -167,7 +168,10 @@ def train_dino(args):
     args.chans = [int(c) for c in args.chans]
 
     # ============ preparing data ... ============
-    img_shape = (3,224,224) if "cifar" not in args.data_path.lower() else (3,32,32)
+    if len(args.img_shape)==0:
+        img_shape = (3,32,32) if "cifar" not in args.data_path.lower() else (3,224,224) 
+    else: img_shape = args.img_shape
+
     transform = DataAugmentationDINO(
         args.global_crops_scale,
         args.local_crops_scale,
