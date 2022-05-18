@@ -365,7 +365,10 @@ class TreeCNN(nn.Module):
         x = self.base(x)
         outps = []
         if self.leaf_idx is not None:
-            outps.append( self.cnns[self.leaf_idx](x) )
+            x_copy = x.clone().data.detach()
+            for i,cnn in enumerate(self.cnns):
+                if i == self.leaf_idx: outps.append( cnn(x) )
+                else: outps.append( cnn(x_copy) )
         elif self.agg_fxn_str == "AvgOverDim":
             p = 1/self.n_cnns
             outpt = self.cnns[0](x)
