@@ -70,7 +70,8 @@ def get_args_parser():
     parser.add_argument('--share_base', default="False", type=str,
         help="""all cnns share the first 2 layers""")
     parser.add_argument('--agg_fxn', default="AvgOverDim", type=str, 
-        choices=['AvgOverDim', 'AttentionalJoin', "RecurrentAttention"],
+        choices=['AvgOverDim', 'AttentionalJoin', "RecurrentAttention",
+                "DenseJoin"],
         help="""The name of the aggregation function defined in models.py""")
     parser.add_argument('--patch_size', default=16, type=int, help="""Size in pixels
         of input square patches - default 16 (for 16x16 patches). Using smaller
@@ -222,7 +223,7 @@ def train_dino(args):
             "lnorm": args.lnorm,
             "h_size": args.h_size,
             "agg_fxn": args.agg_fxn,
-            "out_dim": args.agg_dim,
+            "agg_dim": args.agg_dim,
             "share_base": args.share_base,
             "seq_len": args.seq_len,
             "cls": args.cls,

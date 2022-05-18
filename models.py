@@ -156,7 +156,7 @@ class CNN(nn.Module):
                        strides=1,
                        paddings=0,
                        lnorm=True,
-                       out_dim=64,
+                       agg_dim=64,
                        actv_layer=nn.ReLU,
                        drop=0.,
                        n_outlayers=1,
@@ -178,7 +178,7 @@ class CNN(nn.Module):
             paddings: int or list of ints
                 if single int, will use as padding for all layers.
             lnorm: bool
-            out_dim: int
+            agg_dim: int
             actv_layer: torch module
             drop: float
                 the probability to drop a node in the network
@@ -200,7 +200,7 @@ class CNN(nn.Module):
         """
         super().__init__()
         self.inpt_shape = inpt_shape
-        self.out_dim = out_dim
+        self.agg_dim = agg_dim
         self.h_size = h_size
         self.n_outlayers = n_outlayers
         self.chans = [inpt_shape[0], *chans]
@@ -256,24 +256,24 @@ class CNN(nn.Module):
             modules.append( Reshape((self.chans[-1], -1)) )
             modules.append( Transpose((0,2,1)) )
             modules.append( AttentionalJoin(
-                out_dim=self.chans[-1]), pos_enc=False
+                agg_dim=self.chans[-1]), pos_enc=False
             )
             in_dim = self.chans[-1]
         elif self.output_type == "alt_attn":
             modules.append( Transpose((0,2,3,1)) )
             modules.append( AlternatingAttention(
-                out_dim=self.chans[-1], seq_len=4, cls=cls
+                agg_dim=self.chans[-1], seq_len=4, cls=cls
             ))
             in_dim = self.chans[-1]
         else:
             self.flat_dim = int(self.chans[-1]*math.prod(self.shapes[-1]))
             in_dim = self.flat_dim
         modules.append( Flatten() )
-        out_dim = self.h_size
+        agg_dim = self.h_size
         for i in range(self.n_outlayers):
-            if i+1 == self.n_outlayers: out_dim = self.out_dim
+            if i+1 == self.n_outlayers: agg_dim = self.agg_dim
             modules.append( nn.LayerNorm(in_dim) )
-            modules.append( nn.Linear(in_dim, out_dim) )
+            modules.append( nn.Linear(in_dim, agg_dim) )
             torch.nn.init.kaiming_normal_(
                 modules[-1].weight,
                 nonlinearity='relu'
@@ -293,7 +293,8 @@ class CNN(nn.Module):
         Args:
             x: torch FloatTensor (B, C, H, W)
         """
-        return self.net(x)
+        fx = self.net(x)
+        return fx
 
 
 class TreeCNN(nn.Module):
@@ -319,7 +320,7 @@ class TreeCNN(nn.Module):
             paddings: int or list of ints
                 if single int, will use as padding for all layers.
             lnorm: bool
-            out_dim: int
+            agg_dim: int
                 the output dimensionality of each CNN and the whole
                 TreeCNN
             actv_layer: torch module
@@ -331,9 +332,10 @@ class TreeCNN(nn.Module):
                 method for consolidating and outputting cnn activations
         """
         super().__init__()
+        if "agg_dim" not in kwargs: kwargs["agg_dim"]=kwargs["out_dim"]
         self.share_base = share_base
         self.n_cnns = n_cnns
-        self.out_dim = kwargs["out_dim"]
+        self.agg_dim = kwargs["agg_dim"]
         self.base = NullOp()
         if self.share_base:
             kwgs = {
@@ -348,6 +350,7 @@ class TreeCNN(nn.Module):
         for n in range(n_cnns):
             self.cnns.append( CNN(**kwargs) )
         self.agg_fxn_str = agg_fxn
+        kwargs["n_cnns"] = self.n_cnns
         self.agg_fxn = globals()[agg_fxn](**kwargs)
         self.leaf_idx = None
 
@@ -432,15 +435,15 @@ class AttentionalJoin(nn.Module):
     Uses a CLS token to extract features using attention from a sequence
     of vectors.
     """
-    def __init__(self, out_dim, pos_enc=False, cls=True, *args, **kwargs):
+    def __init__(self, agg_dim, pos_enc=False, cls=True, *args, **kwargs):
         super().__init__()
-        self.dim = out_dim
-        self.attn = Attention(dim=out_dim, *args, **kwargs)
+        self.dim = agg_dim
+        self.attn = Attention(dim=agg_dim, *args, **kwargs)
         self.cls = None
-        if cls: self.cls = nn.Parameter(torch.zeros(1,1,out_dim))
+        if cls: self.cls = nn.Parameter(torch.zeros(1,1,agg_dim))
         self.pos_enc = pos_enc
         if self.pos_enc:
-            self.pos_enc = PositionalEncoding( d_model=out_dim, max_len=5000 )
+            self.pos_enc = PositionalEncoding( d_model=agg_dim, max_len=5000 )
 
     def forward(self, x):
         """
@@ -504,12 +507,12 @@ class RecurrentAttention(nn.Module):
     repeats with the outputs of that step (N//k fewer inputs in the 2nd
     step). Repeats until only 1 output is left which is returned.
     """
-    def __init__(self, out_dim, seq_len=4, pos_enc=False, cls=True, *args, **kwargs):
+    def __init__(self, agg_dim, seq_len=4, pos_enc=False, cls=True, *args, **kwargs):
         super().__init__()
-        self.dim = out_dim
+        self.dim = agg_dim
         self.seq_len = seq_len
-        self.attn_join = AttentionalJoin(out_dim, pos_enc,cls=cls, **kwargs)
-        self.edge = nn.Parameter(torch.zeros(1,1,out_dim))
+        self.attn_join = AttentionalJoin(agg_dim, pos_enc,cls=cls, **kwargs)
+        self.edge = nn.Parameter(torch.zeros(1,1,agg_dim))
 
     def forward(self, x):
         """
@@ -538,12 +541,12 @@ class AlternatingAttention(nn.Module):
     """
     Alternates applying attention along rows and then along columns.
     """
-    def __init__(self, out_dim,
+    def __init__(self, agg_dim,
                        seq_len=4,
                        cls=True,
                        *args, **kwargs):
         """
-        out_dim: int
+        agg_dim: int
             the dimensionality of the inputs and attention module
         seq_len: int
             the number of elements to perform attention over
@@ -552,9 +555,9 @@ class AlternatingAttention(nn.Module):
             output token.
         """
         super().__init__()
-        self.dim = out_dim
+        self.dim = agg_dim
         self.seq_len = seq_len
-        self.attn_join = AttentionalJoin(out_dim, pos_enc=True, cls=cls, **kwargs)
+        self.attn_join = AttentionalJoin(agg_dim, pos_enc=True, cls=cls, **kwargs)
 
     def forward(self, x):
         """
@@ -579,5 +582,49 @@ class AlternatingAttention(nn.Module):
             fx = self.attn_join(fx)
             fx = fx.reshape(B,H,W,D).permute(0,2,1,3)
         return fx.reshape(B,D)
+
+
+class DenseJoin(nn.Module):
+    def __init__(self, n_cnns,
+                       agg_dim,
+                       h_size=256,
+                       n_layers=3,
+                       lnorm=True,
+                       actv_layer=nn.ReLU,
+                       *args, **kwargs):
+        """
+        agg_dim: int
+            a bit of a misnomer. this is actually the input dim
+        """
+        super().__init__()
+        self.n_cnns = n_cnns
+        self.agg_dim = agg_dim
+        self.h_size = h_size
+        self.lnorm = lnorm
+        self.n_layers = n_layers
+        self.actv_layer = actv_layer
+
+        self.inpt_size = self.n_cnns*self.agg_dim
+        modules = []
+        inpt_size = self.inpt_size
+        output_size = self.h_size
+        for i in range(self.n_layers):
+            if i == (self.n_layers-1): output_size = self.agg_dim
+            if self.lnorm: modules.append(nn.LayerNorm(inpt_size))
+            modules.append(nn.Linear(inpt_size, output_size))
+            modules.append(self.actv_layer())
+            inpt_size = self.h_size
+        self.dense = nn.Sequential( *modules )
+
+    def forward(self, x):
+        """
+            x: torch FloatTensor (B, N_CNNS, D)
+        Returns:
+            fx: torch FloatTensor (B, H)
+                the attended values. will maintain
+        """
+        x = x.reshape(len(x), -1)
+        return self.dense(x)
+
 
 
