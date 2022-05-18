@@ -133,14 +133,17 @@ def get_args_parser():
 
     # Multi-crop parameters
     parser.add_argument('--img_shape', type=int, nargs="+", default=[])
-    parser.add_argument('--global_crops_scale', type=float, nargs='+', default=(0.4, 1.),
+    # DEFAULT FROM DINO WAS: (0.4, 1)
+    parser.add_argument('--global_crops_scale', type=float, nargs='+', default=(0.5, 1.),
         help="""Scale range of the cropped image before resizing, relatively to the origin image.
         Used for large global view cropping. When disabling multi-crop (--local_crops_number 0), we
         recommand using a wider range of scale ("--global_crops_scale 0.14 1." for example)""")
+    # DEFAULT FROM DINO WAS: 8
     parser.add_argument('--local_crops_number', type=int, default=8, help="""Number of small
         local views to generate. Set this parameter to 0 to disable multi-crop training.
         When disabling multi-crop we recommend to use "--global_crops_scale 0.14 1." """)
-    parser.add_argument('--local_crops_scale', type=float, nargs='+', default=(0.05, 0.4),
+    # DEFAULT FROM DINO WAS: (0.05, 0.4)
+    parser.add_argument('--local_crops_scale', type=float, nargs='+', default=(0.25, 0.6),
         help="""Scale range of the cropped image before resizing, relatively to the origin image.
         Used for small local view cropping of multi-crop.""")
 
