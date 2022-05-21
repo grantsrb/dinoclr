@@ -156,6 +156,151 @@ def conv_block(chan_in: int,
     return nn.Sequential( *modules )
 
 
+class CNN(nn.Module):
+    def __init__(self, inpt_shape=(3,32,32),
+                       chans=[12,18,24],
+                       ksizes=2,
+                       strides=1,
+                       paddings=0,
+                       lnorm=True,
+                       out_dim=64,
+                       actv_layer=nn.ReLU,
+                       drop=0.,
+                       n_outlayers=1,
+                       h_size=128,
+                       output_type="gapooling",
+                       is_base=False,
+                       cls=True,
+                       *args, **kwargs):
+        """
+        Simple CNN architecture
+        Args:
+            inpt_shape: tuple of ints (C,H,W)
+            chans: list of ints
+            ksizes: int or list of ints
+                if single int, will use as kernel size for all layers.
+            strides: int or list of ints
+                if single int, will use as stride for all layers.
+            paddings: int or list of ints
+                if single int, will use as padding for all layers.
+            lnorm: bool
+            out_dim: int
+            actv_layer: torch module
+            drop: float
+                the probability to drop a node in the network
+            n_outlayers: int
+                the number of dense layers following the convolutional
+                features
+            h_size: int
+            is_base: bool
+                if true, striding is not manipulated and fc layers
+                are skipped
+            output_type: str
+                a string indicating what type of output should be used.
+                options: 
+                    'gapooling': global average pooling 
+                    None: simply flattens features
+                    "attention": attentional join
+                    "alt_attn": alternating attention
+        """
+        super().__init__()
+        self.inpt_shape = inpt_shape
+        self.out_dim = out_dim
+        self.h_size = h_size
+        self.n_outlayers = n_outlayers
+        self.chans = [inpt_shape[0], *chans]
+        self.ksizes = ksizes
+        if isinstance(ksizes, int):
+            self.ksizes = [ksizes for i in range(len(chans))]
+        self.strides = strides
+        if isinstance(strides, int):
+            self.strides = [strides for i in range(len(chans))]
+            if self.inpt_shape[1] > 32 and not is_base:
+                for i in range(min(len(self.strides), 3)):
+                    self.strides[-i] = 2
+        self.paddings = paddings
+        if isinstance(paddings, int):
+            self.paddings = [paddings for i in range(len(chans))]
+        self.lnorm = lnorm
+        self.actv_layer = actv_layer
+        self.drop = drop
+        self.output_type = output_type.lower()
+
+        # Conv Layers
+        self.shapes = [ inpt_shape[-2:] ]
+        modules = []
+        for i in range(len(chans)):
+            modules.append( conv_block(
+                self.chans[i],
+                self.chans[i+1],
+                ksize=self.ksizes[i],
+                stride=self.strides[i],
+                padding=self.paddings[i],
+                actv_layer=self.actv_layer,
+                lnorm=self.lnorm and i!=0,
+                shape=tuple([int(s) for s in self.shapes[-1]]),
+                drop=self.drop
+            ))
+            self.shapes.append( update_shape(
+                self.shapes[-1],
+                kernel=self.ksizes[i],
+                padding=self.paddings[i],
+                stride=self.strides[i]
+            ))
+        self.features = nn.Sequential( *modules )
+
+        if is_base: return
+        # Dense Layers
+        modules = []
+        if self.output_type == "gapooling":
+            modules.append( Reshape((self.chans[-1],-1)) )
+            modules.append( AvgOverDim(-1) )
+            self.flat_dim = self.chans[-1]
+            in_dim = self.flat_dim
+        elif self.output_type == "attention":
+            modules.append( Reshape((self.chans[-1], -1)) )
+            modules.append( Transpose((0,2,1)) )
+            modules.append( AttentionalJoin(
+                out_dim=self.chans[-1]), pos_enc=False
+            )
+            in_dim = self.chans[-1]
+        elif self.output_type == "alt_attn":
+            modules.append( Transpose((0,2,3,1)) )
+            modules.append( AlternatingAttention(
+                out_dim=self.chans[-1], seq_len=4, cls=cls
+            ))
+            in_dim = self.chans[-1]
+        else:
+            self.flat_dim = int(self.chans[-1]*math.prod(self.shapes[-1]))
+            in_dim = self.flat_dim
+        modules.append( Flatten() )
+        out_dim = self.h_size
+        for i in range(self.n_outlayers):
+            if i+1 == self.n_outlayers: out_dim = self.out_dim
+            modules.append( nn.LayerNorm(in_dim) )
+            modules.append( nn.Linear(in_dim, out_dim) )
+            torch.nn.init.kaiming_normal_(
+                modules[-1].weight,
+                nonlinearity='relu'
+            )
+            if i+1 < self.n_outlayers:
+                modules.append( self.actv_layer() )
+            in_dim = self.h_size
+        self.dense = nn.Sequential( *modules )
+        self.net = nn.Sequential(self.features, self.dense)
+
+    def _init_weights(self, m):
+        """ Handled during instantiation """
+        pass
+
+    def forward(self, x):
+        """
+        Args:
+            x: torch FloatTensor (B, C, H, W)
+        """
+        return self.net(x)
+
+
 class GroupedCNN(nn.Module):
     def __init__(self, inpt_shape=(3,32,32),
                        chans=[12,18,24],
