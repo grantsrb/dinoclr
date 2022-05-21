@@ -79,7 +79,7 @@ class NullOp(nn.Module):
 class Transpose(nn.Module):
     """
     Transposes the activations to be of the argued dimension order.
-    Includes the batch dimension
+    Includes the batch dimension.
     """
     def __init__(self, order):
         super().__init__()
@@ -96,9 +96,10 @@ class Transpose(nn.Module):
 
 class Reshape(nn.Module):
     """
-    Reshapes the activations to be of the argued shape
+    Reshapes the activations to be of the argued shape. Ignores the
+    batch dimension unless specified in init.
     """
-    def __init__(self, shape):
+    def __init__(self, shape, ignore_batch_dim=True):
         super().__init__()
         """
         Args:
@@ -106,9 +107,11 @@ class Reshape(nn.Module):
                 the shape should ignore the batch dimension
         """
         self.shape = shape
+        self.ignore_batch_dim = ignore_batch_dim
 
     def forward(self, x):
-        return x.reshape(len(x),*self.shape)
+        if self.ignore_batch_dim: return x.reshape(len(x),*self.shape)
+        return x.reshape(self.shape)
 
 
 def conv_block(chan_in: int,
@@ -119,7 +122,8 @@ def conv_block(chan_in: int,
                lnorm: bool=True,
                shape: tuple=None,
                actv_layer=nn.ReLU,
-               drop: float=0):
+               drop: float=0,
+               groups: int=1):
     """
     Args:
         chan_in: int
@@ -131,6 +135,8 @@ def conv_block(chan_in: int,
         actv_layer: torch module
         drop: float
             dropout probability
+        groups: int
+            the number of independent convolutions within the layer
     """
     modules = []
     if lnorm:
@@ -140,7 +146,8 @@ def conv_block(chan_in: int,
         chan_out,
         ksize,
         stride=stride,
-        padding=padding
+        padding=padding,
+        groups=groups
     ))
     torch.nn.init.xavier_uniform_(modules[-1].weight)
     if drop > 0:
@@ -149,7 +156,7 @@ def conv_block(chan_in: int,
     return nn.Sequential( *modules )
 
 
-class CNN(nn.Module):
+class GroupedCNN(nn.Module):
     def __init__(self, inpt_shape=(3,32,32),
                        chans=[12,18,24],
                        ksizes=2,
@@ -164,6 +171,7 @@ class CNN(nn.Module):
                        output_type="gapooling",
                        is_base=False,
                        cls=True,
+                       groups=1,
                        *args, **kwargs):
         """
         Simple CNN architecture
@@ -189,6 +197,8 @@ class CNN(nn.Module):
             is_base: bool
                 if true, striding is not manipulated and fc layers
                 are skipped
+            groups: int
+                the number of independent cnns to use
             output_type: str
                 a string indicating what type of output should be used.
 
@@ -203,7 +213,7 @@ class CNN(nn.Module):
         self.agg_dim = agg_dim
         self.h_size = h_size
         self.n_outlayers = n_outlayers
-        self.chans = [inpt_shape[0], *chans]
+        self.chans = [inpt_shape[0], *[c*groups for c in chans]]
         self.ksizes = ksizes
         if isinstance(ksizes, int):
             self.ksizes = [ksizes for i in range(len(chans))]
@@ -213,12 +223,15 @@ class CNN(nn.Module):
             if self.inpt_shape[1] > 32 and not is_base:
                 for i in range(min(len(self.strides), 3)):
                     self.strides[-i] = 2
+                print("changing striedes to accomodate larger image")
+                print("strides:", self.strides)
         self.paddings = paddings
         if isinstance(paddings, int):
             self.paddings = [paddings for i in range(len(chans))]
         self.lnorm = lnorm
         self.actv_layer = actv_layer
         self.drop = drop
+        self.groups = groups
         self.output_type = output_type.lower()
 
         # Conv Layers
@@ -234,7 +247,8 @@ class CNN(nn.Module):
                 actv_layer=self.actv_layer,
                 lnorm=self.lnorm and i!=0,
                 shape=tuple([int(s) for s in self.shapes[-1]]),
-                drop=self.drop
+                drop=self.drop,
+                groups=self.groups if i > 0 else 1
             ))
             self.shapes.append( update_shape(
                 self.shapes[-1],
@@ -247,40 +261,57 @@ class CNN(nn.Module):
         if is_base: return
         # Dense Layers
         modules = []
+        n_chans = self.chans[-1]//self.groups
         if self.output_type == "gapooling":
-            modules.append( Reshape((self.chans[-1],-1)) )
+            if self.groups>1:
+                modules.append( Reshape((self.groups,n_chans,-1)) )
+            else:
+                modules.append( Reshape((n_chans,-1)) )
             modules.append( AvgOverDim(-1) )
-            self.flat_dim = self.chans[-1]
+            self.flat_dim = n_chans*self.groups
             in_dim = self.flat_dim
         elif self.output_type == "attention":
-            modules.append( Reshape((self.chans[-1], -1)) )
-            modules.append( Transpose((0,2,1)) )
+            if self.groups>1:
+                modules.append( Reshape((self.groups,n_chans,-1)) )
+                modules.append( Transpose((0,1,3,2)) )
+                in_dim = self.groups*n_chans
+                raise NotImplemented
+            else:
+                modules.append( Reshape((self.chans[-1], -1)) )
+                modules.append( Transpose((0,2,1)) )
+                in_dim = self.chans[-1]
             modules.append( AttentionalJoin(
-                agg_dim=self.chans[-1]), pos_enc=False
+                agg_dim=n_chans), pos_enc=False
             )
-            in_dim = self.chans[-1]
         elif self.output_type == "alt_attn":
-            modules.append( Transpose((0,2,3,1)) )
+            if self.groups>1:
+                H,W = self.shapes[-1]
+                modules.append( Reshape((self.groups,n_chans,H,W)) )
+                modules.append( Transpose((0,1,3,4,2)) )
+                in_dim = self.groups*n_chans
+                raise NotImplemented
+            else:
+                modules.append( Transpose((0,2,3,1)) )
+                in_dim = self.chans[-1]
             modules.append( AlternatingAttention(
                 agg_dim=self.chans[-1], seq_len=4, cls=cls
             ))
-            in_dim = self.chans[-1]
         else:
-            self.flat_dim = int(self.chans[-1]*math.prod(self.shapes[-1]))
+            self.flat_dim =int(self.chans[-1]*math.prod(self.shapes[-1]))
             in_dim = self.flat_dim
-        modules.append( Flatten() )
-        agg_dim = self.h_size
+        modules.append( Reshape((-1,1,1)) )
+        agg_dim = self.h_size*self.groups
         for i in range(self.n_outlayers):
-            if i+1 == self.n_outlayers: agg_dim = self.agg_dim
-            modules.append( nn.LayerNorm(in_dim) )
-            modules.append( nn.Linear(in_dim, agg_dim) )
-            torch.nn.init.kaiming_normal_(
-                modules[-1].weight,
-                nonlinearity='relu'
+            if i+1 == self.n_outlayers: agg_dim=self.agg_dim*self.groups
+            modules.append( nn.GroupNorm(self.groups, in_dim) )
+            modules.append(
+                nn.Conv2d(in_dim, agg_dim, 1, groups=self.groups)
             )
+            torch.nn.init.xavier_uniform_( modules[-1].weight )
             if i+1 < self.n_outlayers:
                 modules.append( self.actv_layer() )
-            in_dim = self.h_size
+            in_dim = self.h_size*self.groups
+        modules.append( Reshape((self.groups,-1)) )
         self.dense = nn.Sequential( *modules )
         self.net = nn.Sequential(self.features, self.dense)
 
@@ -292,9 +323,91 @@ class CNN(nn.Module):
         """
         Args:
             x: torch FloatTensor (B, C, H, W)
+        Returns:
+            fx: torch FloatTensor (B, G, D)
         """
         fx = self.net(x)
         return fx
+
+
+class GroupedTreeCNN(nn.Module):
+    def __init__(self, n_cnns=1,
+                       agg_fxn="AvgOverDim",
+                       share_base=False,
+                       **kwargs):
+        """
+        This model architecture resembles a tree structure in which
+        multiple small CNNs feed into a final layer.
+
+        Args:
+            n_cnns: int
+                the number of individual CNN networks to instantiate.
+            agg_fxn: str
+                the function used to combine the leaf cnns
+            inpt_shape: tuple of ints
+            chans: list of ints
+            ksizes: int or list of ints
+                if single int, will use as kernel size for all layers.
+            strides: int or list of ints
+                if single int, will use as stride for all layers.
+            paddings: int or list of ints
+                if single int, will use as padding for all layers.
+            lnorm: bool
+            agg_dim: int
+                the output dimensionality of each CNN and the whole
+                TreeCNN
+            actv_layer: torch module
+            drop: float
+                the probability to drop a node in the network
+            h_size: int
+                hidden dim of dense layers in cnn final layers
+            output_type: str
+                method for consolidating and outputting cnn activations
+        """
+        super().__init__()
+        if "agg_dim" not in kwargs: kwargs["agg_dim"]=kwargs["out_dim"]
+        self.share_base = share_base
+        self.n_cnns = n_cnns
+        self.agg_dim = kwargs["agg_dim"]
+        self.base = NullOp()
+        if self.share_base:
+            kwgs = {
+                **kwargs,
+                "groups": 1,
+                "chans": kwargs["chans"][:2],
+                "is_base": True
+            }
+            cnn = GroupedCNN(**kwgs)
+            self.base = cnn.features
+            kwargs["inpt_shape"] = [kwgs["chans"][-1], *cnn.shapes[-1]]
+            kwargs["chans"] = kwargs["chans"][2:]
+        kwargs["groups"] = self.n_cnns
+        self.cnn = GroupedCNN( **kwargs )
+        self.agg_fxn_str = agg_fxn
+        kwargs["n_cnns"] = self.n_cnns
+        self.agg_fxn = globals()[agg_fxn](**kwargs)
+        self.leaf_idx = None
+
+    def forward(self, x):
+        """
+        Args:
+            x: torch FloatTensor (B, C, H, W)
+        Returns:
+            joined_outps: torch FloatTensor (B, D)
+            outps: torch FloatTensor (B, D)
+        """
+        x = self.base(x)
+        if self.leaf_idx is not None:
+            fx1 = self.cnn(x)
+            x_copy = x.clone().data.detach()
+            with torch.no_grad():
+                fx2 = self.cnn(x_copy)
+            mask = torch.zeros(self.n_cnns,1).to(fx1.get_device())
+            mask[self.leaf_idx] = 1
+            outps = fx1*mask + fx2*(1-mask)
+        else:
+            outps = self.cnn(x) # (B, G, D)
+        return self.agg_fxn( outps )
 
 
 class TreeCNN(nn.Module):
@@ -631,4 +744,89 @@ class DenseJoin(nn.Module):
         return self.dense(x)
 
 
+class Resnet(nn.Module):
+    def __init__(self, n_cnns=1,
+                       agg_fxn="AvgOverDim",
+                       share_base=False,
+                       **kwargs):
+        """
+        This model architecture resembles a tree structure in which
+        multiple small CNNs feed into a final layer.
+
+        Args:
+            n_cnns: int
+                the number of individual CNN networks to instantiate.
+            agg_fxn: str
+                the function used to combine the leaf cnns
+            inpt_shape: tuple of ints
+            chans: list of ints
+            ksizes: int or list of ints
+                if single int, will use as kernel size for all layers.
+            strides: int or list of ints
+                if single int, will use as stride for all layers.
+            paddings: int or list of ints
+                if single int, will use as padding for all layers.
+            lnorm: bool
+            agg_dim: int
+                the output dimensionality of each CNN and the whole
+                TreeCNN
+            actv_layer: torch module
+            drop: float
+                the probability to drop a node in the network
+            h_size: int
+                hidden dim of dense layers in cnn final layers
+            output_type: str
+                method for consolidating and outputting cnn activations
+        """
+        super().__init__()
+        if "agg_dim" not in kwargs: kwargs["agg_dim"]=kwargs["out_dim"]
+        self.share_base = share_base
+        self.n_cnns = n_cnns
+        self.agg_dim = kwargs["agg_dim"]
+        self.base = NullOp()
+        if self.share_base:
+            kwgs = {
+                **kwargs,
+                "chans":kwargs["chans"][:2],
+                "is_base": True
+            }
+            cnn = CNN(**kwgs)
+            self.base = cnn.features
+            kwargs["inpt_shape"] = [kwgs["chans"][-1], *cnn.shapes[-1]]
+            kwargs["chans"] = kwargs["chans"][2:]
+        self.cnns = nn.ModuleList([])
+        for n in range(n_cnns):
+            self.cnns.append( CNN(**kwargs) )
+        self.agg_fxn_str = agg_fxn
+        kwargs["n_cnns"] = self.n_cnns
+        self.agg_fxn = globals()[agg_fxn](**kwargs)
+        self.leaf_idx = None
+
+    def forward(self, x):
+        """
+        Args:
+            x: torch FloatTensor (B, C, H, W)
+        Returns:
+            joined_outps: torch FloatTensor (B, D)
+            outps: torch FloatTensor (B, D)
+        """
+        x = self.base(x)
+        outps = []
+        if self.leaf_idx is not None:
+            x_copy = x.clone().data.detach()
+            for i,cnn in enumerate(self.cnns):
+                if i == self.leaf_idx: outps.append( cnn(x) )
+                else: outps.append( cnn(x_copy) )
+        elif self.agg_fxn_str == "AvgOverDim":
+            p = 1/self.n_cnns
+            outpt = self.cnns[0](x)
+            for cnn in self.cnns[1:]:
+                outpt += cnn(x)
+            return p*outpt
+        else:
+            for cnn in self.cnns:
+                outps.append( cnn(x) )
+        outps = torch.stack(outps, dim=1)
+        self.outps = outps
+        return self.agg_fxn( outps )
 

@@ -45,7 +45,7 @@ def get_args_parser():
 
     # Model parameters
     parser.add_argument('--arch', default='vit_small', type=str,
-        choices=['TreeCNN', 'vit_tiny', 'vit_small', 'vit_base',
+        choices=['TreeCNN', "GroupedTreeCNN", 'vit_tiny', 'vit_small', 'vit_base',
                 'xcit', 'deit_tiny', 'deit_small'] \
                 + torchvision_archs + torch.hub.list("facebookresearch/xcit:main"),
         help="""Name of architecture to train. For quick experiments with ViTs,
