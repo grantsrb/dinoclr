@@ -346,6 +346,7 @@ class TreeCNN(nn.Module):
             cnn = CNN(**kwgs)
             self.base = cnn.features
             kwargs["inpt_shape"] = [kwgs["chans"][-1], *cnn.shapes[-1]]
+            kwargs["chans"] = kwargs["chans"][2:]
         self.cnns = nn.ModuleList([])
         for n in range(n_cnns):
             self.cnns.append( CNN(**kwargs) )
