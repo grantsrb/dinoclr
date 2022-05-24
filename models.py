@@ -402,8 +402,8 @@ class GroupedCNN(nn.Module):
                 stride=self.strides[i]
             ))
         self.features = nn.Sequential( *modules )
-
         if is_base: return
+
         # Dense Layers
         modules = []
         n_chans = self.chans[-1]//self.groups
@@ -420,7 +420,6 @@ class GroupedCNN(nn.Module):
                 modules.append( Reshape((self.groups,n_chans,-1)) )
                 modules.append( Transpose((0,1,3,2)) )
                 in_dim = self.groups*n_chans
-                raise NotImplemented
             else:
                 modules.append( Reshape((self.chans[-1], -1)) )
                 modules.append( Transpose((0,2,1)) )
@@ -707,23 +706,32 @@ class AttentionalJoin(nn.Module):
         if self.pos_enc:
             self.pos_enc = PositionalEncoding( d_model=agg_dim, max_len=5000 )
 
+    # TODO: needs testing
     def forward(self, x):
         """
         Args:
-            x: torch FloatTensor (B,N,D)
+            x: torch FloatTensor (...,N,D)
         Returns:
-            fx: torch FloatTensor (B,D)
+            fx: torch FloatTensor (...,D)
                 the attended values
         """
+        og_shape = x.shape
+        x = x.reshape(-1, *og_shape[-2:])
         B,N,D = x.shape
         if self.pos_enc: x = self.pos_enc(x)
         if self.cls is not None:
             cls = self.cls.repeat(B,1,1)
             fx,_ = self.attn(cls, x)
-            return fx[...,0,:]
+            fx = fx[...,0,:]
+            if len(og_shape) > 3:
+                fx = fx.reshape(*og_shape[:-2], fx.shape[-1])
+            return fx
         else:
             fx,_ = self.attn(x, x)
-            return fx.mean(-2)
+            fx = fx.mean(-2)
+            if len(og_shape) > 3:
+                fx = fx.reshape(*og_shape[:-2], fx.shape[-1])
+            return fx
 
 
 class PositionalEncoding(nn.Module):
@@ -889,89 +897,91 @@ class DenseJoin(nn.Module):
         return self.dense(x)
 
 
+def get_mlp(in_size, h_size, out_size, n_layers=2, lnorm=True):
+    """
+    Args:
+        in_size: int
+        h_size: int
+        out_size: int
+        n_layers: int
+        lnorm: bool
+            determines if uses layer norm
+    """
+    modules = []
+    if lnorm:
+        modules.append( nn.LayerNorm(in_size) )
+    modules.append(nn.Linear(in_size, h_size) )
+    for i in range(n_layers):
+        modules.append(nn.ReLU())
+        if lnorm: modules.append( nn.LayerNorm(h_size) )
+        out = h_size if i+1 < n_layers else out_size
+        modules.append( nn.Linear(h_size, out) )
+    return nn.Sequential(*modules)
+
+
 class Resnet(nn.Module):
-    def __init__(self, n_cnns=1,
-                       agg_fxn="AvgOverDim",
-                       share_base=False,
-                       **kwargs):
+    def __init__(self, inpt_shape,
+                       agg_dim=64,
+                       h_size=128,
+                       n_outlayers=1,
+                       lnorm=True,
+                       agg_fxn="AvgOverDim"):
         """
         This model architecture resembles a tree structure in which
         multiple small CNNs feed into a final layer.
 
         Args:
-            n_cnns: int
-                the number of individual CNN networks to instantiate.
             agg_fxn: str
                 the function used to combine the leaf cnns
             inpt_shape: tuple of ints
-            chans: list of ints
-            ksizes: int or list of ints
-                if single int, will use as kernel size for all layers.
-            strides: int or list of ints
-                if single int, will use as stride for all layers.
-            paddings: int or list of ints
-                if single int, will use as padding for all layers.
-            lnorm: bool
             agg_dim: int
-                the output dimensionality of each CNN and the whole
-                TreeCNN
-            actv_layer: torch module
-            drop: float
-                the probability to drop a node in the network
             h_size: int
                 hidden dim of dense layers in cnn final layers
             output_type: str
                 method for consolidating and outputting cnn activations
+            n_outlayers: int
+                the number of dense layers following the convolutional
+                features
         """
         super().__init__()
         if "agg_dim" not in kwargs: kwargs["agg_dim"]=kwargs["out_dim"]
-        self.share_base = share_base
-        self.n_cnns = n_cnns
-        self.agg_dim = kwargs["agg_dim"]
-        self.base = NullOp()
-        if self.share_base:
-            kwgs = {
-                **kwargs,
-                "chans":kwargs["chans"][:2],
-                "is_base": True
-            }
-            cnn = CNN(**kwgs)
-            self.base = cnn.features
-            kwargs["inpt_shape"] = [kwgs["chans"][-1], *cnn.shapes[-1]]
-            kwargs["chans"] = kwargs["chans"][2:]
-        self.cnns = nn.ModuleList([])
-        for n in range(n_cnns):
-            self.cnns.append( CNN(**kwargs) )
+        self.inpt_shape = inpt_shape
+        self.h_size = h_size
+        self.lnorm = lnorm
+        self.n_outlayers = n_outlayers
+        self.features = models.resnet50(pretrained=True)
+        self.agg_dim = agg_dim
         self.agg_fxn_str = agg_fxn
-        kwargs["n_cnns"] = self.n_cnns
-        self.agg_fxn = globals()[agg_fxn](**kwargs)
-        self.leaf_idx = None
+        self.agg_fxn = globals()[agg_fxn](self.agg_dim)
 
+        # Make MLP
+        temp = torch.zeros(1, *self.inpt_shape)
+        temp = self.features(temp)
+        print("shape", temp.shape)
+        temp = self.agg_fxn(temp)
+        temp = temp.reshape(1, -1)
+        self.flat_size = temp.shape[-1]
+        self.dense = get_mlp(
+            in_size=self.flat_size,
+            h_size=self.h_size,
+            n_layers=self.n_outlayers,
+            out_size=self.agg_dim,
+            lnorm=self.lnorm
+        )
+        self.net = nn.Sequential(
+            self.features,
+            self.agg_fxn,
+            self.dense
+        )
+
+    # TODO: NEEDS TESTING
     def forward(self, x):
         """
         Args:
             x: torch FloatTensor (B, C, H, W)
         Returns:
-            joined_outps: torch FloatTensor (B, D)
             outps: torch FloatTensor (B, D)
         """
-        x = self.base(x)
-        outps = []
-        if self.leaf_idx is not None:
-            x_copy = x.clone().data.detach()
-            for i,cnn in enumerate(self.cnns):
-                if i == self.leaf_idx: outps.append( cnn(x) )
-                else: outps.append( cnn(x_copy) )
-        elif self.agg_fxn_str == "AvgOverDim":
-            p = 1/self.n_cnns
-            outpt = self.cnns[0](x)
-            for cnn in self.cnns[1:]:
-                outpt += cnn(x)
-            return p*outpt
-        else:
-            for cnn in self.cnns:
-                outps.append( cnn(x) )
-        outps = torch.stack(outps, dim=1)
-        self.outps = outps
+        outps = self.features(x)
         return self.agg_fxn( outps )
 
