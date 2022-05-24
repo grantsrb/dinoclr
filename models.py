@@ -163,7 +163,7 @@ class CNN(nn.Module):
                        strides=1,
                        paddings=0,
                        lnorm=True,
-                       out_dim=64,
+                       agg_dim=64,
                        actv_layer=nn.ReLU,
                        drop=0.,
                        n_outlayers=1,
@@ -184,7 +184,7 @@ class CNN(nn.Module):
             paddings: int or list of ints
                 if single int, will use as padding for all layers.
             lnorm: bool
-            out_dim: int
+            agg_dim: int
             actv_layer: torch module
             drop: float
                 the probability to drop a node in the network
@@ -205,7 +205,7 @@ class CNN(nn.Module):
         """
         super().__init__()
         self.inpt_shape = inpt_shape
-        self.out_dim = out_dim
+        self.agg_dim = agg_dim
         self.h_size = h_size
         self.n_outlayers = n_outlayers
         self.chans = [inpt_shape[0], *chans]
@@ -261,24 +261,24 @@ class CNN(nn.Module):
             modules.append( Reshape((self.chans[-1], -1)) )
             modules.append( Transpose((0,2,1)) )
             modules.append( AttentionalJoin(
-                out_dim=self.chans[-1]), pos_enc=False
+                agg_dim=self.chans[-1]), pos_enc=False
             )
             in_dim = self.chans[-1]
         elif self.output_type == "alt_attn":
             modules.append( Transpose((0,2,3,1)) )
             modules.append( AlternatingAttention(
-                out_dim=self.chans[-1], seq_len=4, cls=cls
+                agg_dim=self.chans[-1], seq_len=4, cls=cls
             ))
             in_dim = self.chans[-1]
         else:
             self.flat_dim = int(self.chans[-1]*math.prod(self.shapes[-1]))
             in_dim = self.flat_dim
         modules.append( Flatten() )
-        out_dim = self.h_size
+        agg_dim = self.h_size
         for i in range(self.n_outlayers):
-            if i+1 == self.n_outlayers: out_dim = self.out_dim
+            if i+1 == self.n_outlayers: agg_dim = self.agg_dim
             modules.append( nn.LayerNorm(in_dim) )
-            modules.append( nn.Linear(in_dim, out_dim) )
+            modules.append( nn.Linear(in_dim, agg_dim) )
             torch.nn.init.kaiming_normal_(
                 modules[-1].weight,
                 nonlinearity='relu'
