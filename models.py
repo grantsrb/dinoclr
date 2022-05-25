@@ -17,6 +17,7 @@ from functools import partial
 
 import torch
 import torch.nn as nn
+import torchvision.models
 
 import numpy as np
 
@@ -79,7 +80,7 @@ class NullOp(nn.Module):
 class Transpose(nn.Module):
     """
     Transposes the activations to be of the argued dimension order.
-    Includes the batch dimension.
+    Include the batch dimension in your order argument.
     """
     def __init__(self, order):
         super().__init__()
@@ -114,16 +115,75 @@ class Reshape(nn.Module):
         return x.reshape(self.shape)
 
 
-def conv_block(chan_in: int,
+class ResBlock(nn.Module):
+    def __init__(self, chan_in: int,
                chan_out: int,
                ksize: int=2,
                stride: int=1,
                padding: int=0,
                lnorm: bool=True,
-               shape: tuple=None,
                actv_layer=nn.ReLU,
                drop: float=0,
                groups: int=1):
+        """
+        chan_in: int
+        chan_out: int
+        ksize: int
+        stride: int
+        padding: int
+        lnorm: bool
+        actv_layer: torch module
+        drop: float
+            dropout probability
+        groups: int
+            the number of independent convolutions within the layer
+        """
+        super().__init__()
+        self.proj = nn.Conv2d(
+          chan_in,chan_out,ksize,stride=stride,padding=padding,groups=groups
+        )
+        torch.nn.init.xavier_uniform_(self.proj.weight)
+        if ksize%2 == 0: padding = (1,0,1,0)
+        self.conv1 = conv_block(
+            chan_out,
+            chan_out,
+            ksize=ksize,
+            stride=1,
+            padding=padding,
+            lnorm=lnorm,
+            actv_layer=actv_layer,
+            drop=drop,
+            groups=groups,
+            residual=False
+        )
+        self.conv2 = conv_block(
+            chan_out,
+            chan_out,
+            ksize=ksize,
+            stride=1,
+            padding=padding,
+            lnorm=lnorm,
+            actv_layer=actv_layer,
+            drop=drop,
+            groups=groups,
+            residual=False
+        )
+        self.norm = nn.GroupNorm(groups,chan_out)
+
+    def forward(self, x):
+        fx = self.proj(x)
+        return self.norm(fx + self.conv2(self.conv1(fx)))
+
+def conv_block(chan_in: int,
+               chan_out: int,
+               ksize: int=2,
+               stride: int=1,
+               padding: int or tuple=0,
+               lnorm: bool=True,
+               actv_layer=nn.ReLU,
+               drop: float=0,
+               groups: int=1,
+               residual=False):
     """
     Args:
         chan_in: int
@@ -137,10 +197,27 @@ def conv_block(chan_in: int,
             dropout probability
         groups: int
             the number of independent convolutions within the layer
+        residual: bool
+            if true, uses residual style connections
     """
+    if residual:
+        return ResBlock(
+            chan_in=chan_in,
+            chan_out=chan_out,
+            ksize=ksize,
+            stride=stride,
+            padding=padding,
+            lnorm=lnorm,
+            actv_layer=actv_layer,
+            drop=drop,
+            groups=groups
+        )
     modules = []
     if lnorm:
-        modules.append( nn.GroupNorm(1,chan_in) )
+        modules.append( nn.GroupNorm(groups,chan_in) )
+    if type(padding) != type(int(1)) and len(padding) > 2:
+        modules.append(nn.ConstantPad2d(padding, 0))
+        padding = 0
     modules.append( nn.Conv2d(
         chan_in,
         chan_out,
@@ -238,7 +315,6 @@ class CNN(nn.Module):
                 padding=self.paddings[i],
                 actv_layer=self.actv_layer,
                 lnorm=self.lnorm and i!=0,
-                shape=tuple([int(s) for s in self.shapes[-1]]),
                 drop=self.drop
             ))
             self.shapes.append( update_shape(
@@ -317,6 +393,7 @@ class GroupedCNN(nn.Module):
                        is_base=False,
                        cls=True,
                        groups=1,
+                       residual_convs=False,
                        *args, **kwargs):
         """
         Simple CNN architecture
@@ -352,6 +429,8 @@ class GroupedCNN(nn.Module):
                     None: simply flattens features
                     "attention": attentional join
                     "alt_attn": alternating attention
+            residual_convs: bool
+                resnet style convolutions
         """
         super().__init__()
         self.inpt_shape = inpt_shape
@@ -378,6 +457,7 @@ class GroupedCNN(nn.Module):
         self.drop = drop
         self.groups = groups
         self.output_type = output_type.lower()
+        self.residual_convs = residual_convs
 
         # Conv Layers
         self.shapes = [ inpt_shape[-2:] ]
@@ -391,9 +471,9 @@ class GroupedCNN(nn.Module):
                 padding=self.paddings[i],
                 actv_layer=self.actv_layer,
                 lnorm=self.lnorm and i!=0,
-                shape=tuple([int(s) for s in self.shapes[-1]]),
                 drop=self.drop,
-                groups=self.groups if i > 0 else 1
+                groups=self.groups if i > 0 else 1,
+                residual=i>0 and self.residual_convs
             ))
             self.shapes.append( update_shape(
                 self.shapes[-1],
@@ -478,6 +558,7 @@ class GroupedTreeCNN(nn.Module):
     def __init__(self, n_cnns=1,
                        agg_fxn="AvgOverDim",
                        share_base=False,
+                       proj_agg=False,
                        **kwargs):
         """
         This model architecture resembles a tree structure in which
@@ -507,6 +588,11 @@ class GroupedTreeCNN(nn.Module):
                 hidden dim of dense layers in cnn final layers
             output_type: str
                 method for consolidating and outputting cnn activations
+            residual_convs: bool
+                if true, each convolution is a residual style convolution
+            proj_agg: bool
+                if true, the aggregated output is processed by a proj
+                layer
         """
         super().__init__()
         if "agg_dim" not in kwargs: kwargs["agg_dim"]=kwargs["out_dim"]
@@ -531,6 +617,9 @@ class GroupedTreeCNN(nn.Module):
         kwargs["n_cnns"] = self.n_cnns
         self.agg_fxn = globals()[agg_fxn](**kwargs)
         self.leaf_idx = None
+        self.proj = NullOp()
+        if proj_agg:
+            self.proj = nn.Linear(self.agg_dim, self.agg_dim)
 
     def forward(self, x):
         """
@@ -551,7 +640,8 @@ class GroupedTreeCNN(nn.Module):
             outps = fx1*mask + fx2*(1-mask)
         else:
             outps = self.cnn(x) # (B, G, D)
-        return self.agg_fxn( outps )
+        agg = self.agg_fxn( outps )
+        return self.proj(agg)
 
 
 class TreeCNN(nn.Module):
@@ -792,6 +882,8 @@ class RecurrentAttention(nn.Module):
             fx: torch FloatTensor (B,D)
                 the attended values
         """
+        og_shape = x.shape
+        if len(og_shape) > 3: x = x.reshape(-1,*og_shape[-2:])
         B,N,D = x.shape
         fx = x
         while fx.numel() > B*D:
@@ -804,7 +896,9 @@ class RecurrentAttention(nn.Module):
             fx = fx.reshape(-1,self.seq_len,D)
             fx = self.attn_join(fx)
             fx = fx.reshape(B,-1,D)
-        return fx.reshape(B,D)
+        fx = fx.reshape(B,D)
+        if len(og_shape) > 3: fx = fx.reshape(*og_shape[:-2], D)
+        return fx
 
 
 class AlternatingAttention(nn.Module):
@@ -907,7 +1001,7 @@ def get_mlp(in_size, h_size, out_size, n_layers=2, lnorm=True):
         lnorm: bool
             determines if uses layer norm
     """
-    modules = []
+    modules = [Flatten()]
     if lnorm:
         modules.append( nn.LayerNorm(in_size) )
     modules.append(nn.Linear(in_size, h_size) )
@@ -919,13 +1013,14 @@ def get_mlp(in_size, h_size, out_size, n_layers=2, lnorm=True):
     return nn.Sequential(*modules)
 
 
-class Resnet(nn.Module):
+class ResNet50(nn.Module):
     def __init__(self, inpt_shape,
                        agg_dim=64,
                        h_size=128,
                        n_outlayers=1,
                        lnorm=True,
-                       agg_fxn="AvgOverDim"):
+                       agg_fxn="AvgOverDim",
+                       *args, **kwargs):
         """
         This model architecture resembles a tree structure in which
         multiple small CNNs feed into a final layer.
@@ -944,25 +1039,26 @@ class Resnet(nn.Module):
                 features
         """
         super().__init__()
-        if "agg_dim" not in kwargs: kwargs["agg_dim"]=kwargs["out_dim"]
         self.inpt_shape = inpt_shape
         self.h_size = h_size
         self.lnorm = lnorm
         self.n_outlayers = n_outlayers
-        self.features = models.resnet50(pretrained=True)
+        resnet = torchvision.models.resnet50(pretrained=True)
+        self.features = nn.Sequential(
+            resnet.conv1,
+            resnet.bn1,
+            resnet.relu,
+            resnet.maxpool,
+            resnet.layer1,
+            resnet.layer2
+        )
         self.agg_dim = agg_dim
         self.agg_fxn_str = agg_fxn
-        self.agg_fxn = globals()[agg_fxn](self.agg_dim)
+        self.agg_fxn = globals()[agg_fxn](**kwargs)
 
         # Make MLP
-        temp = torch.zeros(1, *self.inpt_shape)
-        temp = self.features(temp)
-        print("shape", temp.shape)
-        temp = self.agg_fxn(temp)
-        temp = temp.reshape(1, -1)
-        self.flat_size = temp.shape[-1]
         self.dense = get_mlp(
-            in_size=self.flat_size,
+            in_size=512,
             h_size=self.h_size,
             n_layers=self.n_outlayers,
             out_size=self.agg_dim,
@@ -970,11 +1066,16 @@ class Resnet(nn.Module):
         )
         self.net = nn.Sequential(
             self.features,
+            Reshape((512,-1)),
+            Transpose((0,2,1)),
             self.agg_fxn,
+            Flatten(),
             self.dense
         )
+        temp = torch.zeros(1, *self.inpt_shape)
+        temp = self.net(temp)
+        print("temp agg", temp.shape)
 
-    # TODO: NEEDS TESTING
     def forward(self, x):
         """
         Args:
@@ -982,6 +1083,5 @@ class Resnet(nn.Module):
         Returns:
             outps: torch FloatTensor (B, D)
         """
-        outps = self.features(x)
-        return self.agg_fxn( outps )
+        return self.net(x)
 

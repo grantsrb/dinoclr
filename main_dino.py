@@ -45,7 +45,7 @@ def get_args_parser():
 
     # Model parameters
     parser.add_argument('--arch', default='vit_small', type=str,
-        choices=['TreeCNN', "GroupedTreeCNN", 'vit_tiny', 'vit_small', 'vit_base',
+        choices=['TreeCNN', "GroupedTreeCNN", "ResNet50", 'vit_tiny', 'vit_small', 'vit_base',
                 'xcit', 'deit_tiny', 'deit_small'] \
                 + torchvision_archs + torch.hub.list("facebookresearch/xcit:main"),
         help="""Name of architecture to train. For quick experiments with ViTs,
@@ -59,6 +59,8 @@ def get_args_parser():
     parser.add_argument('--strides', default=2, type=int)
     parser.add_argument('--lnorm', default="True", type=str)
     parser.add_argument('--h_size', default=64, type=int)
+    parser.add_argument('--residual_convs', default=False, type=bool)
+    parser.add_argument('--proj_agg', default=False, type=bool)
     parser.add_argument('--output_type', default="gapooling", type=str,
         choices=['gapooling', "alt_attn", "attention"],
         help="""the feature aggregation function for the leaf cnns""")
@@ -230,7 +232,9 @@ def train_dino(args):
             "share_base": args.share_base,
             "seq_len": args.seq_len,
             "cls": args.cls,
-            "output_type": args.output_type
+            "output_type": args.output_type,
+            "residual_convs": args.residual_convs,
+            "proj_agg": args.proj_agg,
         }
         student = models.__dict__[args.arch](**hyps)
         teacher = models.__dict__[args.arch](**hyps)
