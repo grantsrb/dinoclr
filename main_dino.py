@@ -194,7 +194,10 @@ def train_dino(args):
     if "cifar100" in args.data_path.lower():
         dataset = datasets.CIFAR100(root=args.data_path, train=True, transform=transform)
     elif "cifar10" in args.data_path.lower():
-        dataset = datasets.CIFAR10(root=args.data_path, train=True, transform=transform)
+        try:
+            dataset = datasets.CIFAR10(root=args.data_path, train=True, transform=transform)
+        except:
+            dataset = datasets.CIFAR10(root=args.data_path, train=True, download=True, transform=transform)
     else:
         dataset = datasets.ImageFolder(args.data_path, transform=transform)
     sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
