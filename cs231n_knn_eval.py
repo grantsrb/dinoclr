@@ -184,10 +184,17 @@ for checkpt_path in tqdm(checkpt_paths):
         model.cuda()
         torch.cuda.empty_cache()
         
-        print("Getting train features")
-        train_feats = get_features(model, X_train, step_size=500)
-        print("Getting test features")
-        test_feats = get_features(model, X_test, step_size=500)
+        failure = True
+        bsize = 500
+        while failure and bsize > 10:
+            try:
+                print("Getting train features")
+                train_feats = get_features(model, X_train, step_size=bsize)
+                print("Getting test features")
+                test_feats = get_features(model, X_test, step_size=bsize)
+            except:
+                bsize = bsize//2
+                print("Error ocurred, reducing bsize to", bsize)
         with torch.no_grad():
             print("Computing distances")
             dists = compute_distances_no_loops(train_feats.cpu().data.numpy(), test_feats.cpu().data.numpy())
