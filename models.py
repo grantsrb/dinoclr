@@ -558,7 +558,8 @@ class GroupedTreeCNN(nn.Module):
     def __init__(self, n_cnns=1,
                        agg_fxn="AvgOverDim",
                        share_base=False,
-                       proj_agg=False,
+                       preagg_proj=False,
+                       postagg_proj=False,
                        **kwargs):
         """
         This model architecture resembles a tree structure in which
@@ -590,7 +591,10 @@ class GroupedTreeCNN(nn.Module):
                 method for consolidating and outputting cnn activations
             residual_convs: bool
                 if true, each convolution is a residual style convolution
-            proj_agg: bool
+            preagg_proj: bool
+                if true, the output of each leaf net is projected
+                into an agg space before aggregation
+            postagg_proj: bool
                 if true, the aggregated output is processed by a proj
                 layer
         """
@@ -600,6 +604,8 @@ class GroupedTreeCNN(nn.Module):
         self.n_cnns = n_cnns
         self.agg_dim = kwargs["agg_dim"]
         self.base = NullOp()
+        self.preagg_proj = preagg_proj
+        self.postagg_proj = postagg_proj
         if self.share_base:
             kwgs = {
                 **kwargs,
@@ -617,8 +623,12 @@ class GroupedTreeCNN(nn.Module):
         kwargs["n_cnns"] = self.n_cnns
         self.agg_fxn = globals()[agg_fxn](**kwargs)
         self.leaf_idx = None
+        self.pre_proj = NullOp()
+        if self.preagg_proj:
+            self.pre_proj = nn.Linear(self.agg_dim, self.agg_dim)
         self.proj = NullOp()
-        if proj_agg:
+        if "proj_agg" in kwargs: self.postagg_proj = True
+        if self.postagg_proj:
             self.proj = nn.Linear(self.agg_dim, self.agg_dim)
 
     def forward(self, x):
@@ -640,7 +650,9 @@ class GroupedTreeCNN(nn.Module):
             outps = fx1*mask + fx2*(1-mask)
         else:
             outps = self.cnn(x) # (B, G, D)
-        agg = self.agg_fxn( outps )
+        shape = outps.shape
+        outps = self.pre_proj(outps.reshape(-1, outps.shape[-1]))
+        agg = self.agg_fxn( outps.reshape(shape) )
         return self.proj(agg)
 
 

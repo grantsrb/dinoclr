@@ -60,7 +60,14 @@ def get_args_parser():
     parser.add_argument('--lnorm', default="True", type=str)
     parser.add_argument('--h_size', default=64, type=int)
     parser.add_argument('--residual_convs', default=False, type=bool)
-    parser.add_argument('--proj_agg', default=False, type=bool)
+    parser.add_argument('--proj_agg', default=False, type=bool,
+        help="""deprecated in favor of preagg_proj""")
+    parser.add_argument('--preagg_proj', default=False, type=bool,
+        help="""if true, adds a projection layer to the output of
+        all leaf nets just before aggregation""")
+    parser.add_argument('--postagg_proj', default=False, type=bool,
+        help="""if true, adds a projection layer to the output of
+        the aggregation function""")
     parser.add_argument('--output_type', default="gapooling", type=str,
         choices=['gapooling', "alt_attn", "attention"],
         help="""the feature aggregation function for the leaf cnns""")
@@ -238,6 +245,8 @@ def train_dino(args):
             "output_type": args.output_type,
             "residual_convs": args.residual_convs,
             "proj_agg": args.proj_agg,
+            "postagg_proj": args.preagg_proj,
+            "postagg_proj": args.postagg_proj,
         }
         student = models.__dict__[args.arch](**hyps)
         teacher = models.__dict__[args.arch](**hyps)
