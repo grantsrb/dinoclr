@@ -54,19 +54,22 @@ def get_args_parser():
         individual cnns that make up the larger tree""")
     parser.add_argument('--chans', nargs="+", default=[8,12,16],
         help="""the channel depths of each cnn""")
+    parser.add_argument("--cos_loss", default=0, type=float,
+        help="""The portion of loss from cosine similarity between leaf
+        nets""")
     parser.add_argument('--ksizes', default=2, type=int)
     parser.add_argument('--paddings', default=0, type=int)
     parser.add_argument('--strides', default=2, type=int)
     parser.add_argument('--lnorm', default="True", type=str)
     parser.add_argument('--h_size', default=64, type=int)
-    parser.add_argument('--residual_convs', default=False, type=bool)
-    parser.add_argument('--max_pool', default=False, type=bool)
-    parser.add_argument('--proj_agg', default=False, type=bool,
+    parser.add_argument('--residual_convs', default=False, type=utils.bool_flag)
+    parser.add_argument('--max_pool', default=False, type=utils.bool_flag)
+    parser.add_argument('--proj_agg', default=False, type=utils.bool_flag,
         help="""deprecated in favor of preagg_proj""")
-    parser.add_argument('--preagg_proj', default=False, type=bool,
+    parser.add_argument('--preagg_proj', default=False, type=utils.bool_flag,
         help="""if true, adds a projection layer to the output of
         all leaf nets just before aggregation""")
-    parser.add_argument('--postagg_proj', default=False, type=bool,
+    parser.add_argument('--postagg_proj', default=False, type=utils.bool_flag,
         help="""if true, adds a projection layer to the output of
         the aggregation function""")
     parser.add_argument('--output_type', default="gapooling", type=str,
@@ -145,7 +148,7 @@ def get_args_parser():
     # Multi-crop parameters
     parser.add_argument('--img_shape', type=int, nargs="+", default=[])
     # DEFAULT FROM DINO WAS: (0.4, 1)
-    parser.add_argument('--global_crops_scale', type=float, nargs='+', default=(0.5, 1.),
+    parser.add_argument('--global_crops_scale', type=float, nargs='+', default=(0.4, 1.),
         help="""Scale range of the cropped image before resizing, relatively to the origin image.
         Used for large global view cropping. When disabling multi-crop (--local_crops_number 0), we
         recommand using a wider range of scale ("--global_crops_scale 0.14 1." for example)""")
@@ -154,7 +157,7 @@ def get_args_parser():
         local views to generate. Set this parameter to 0 to disable multi-crop training.
         When disabling multi-crop we recommend to use "--global_crops_scale 0.14 1." """)
     # DEFAULT FROM DINO WAS: (0.05, 0.4)
-    parser.add_argument('--local_crops_scale', type=float, nargs='+', default=(0.25, 0.6),
+    parser.add_argument('--local_crops_scale', type=float, nargs='+', default=(0.05, 0.4),
         help="""Scale range of the cropped image before resizing, relatively to the origin image.
         Used for small local view cropping of multi-crop.""")
 
@@ -323,6 +326,7 @@ def train_dino(args):
         args.teacher_temp,
         args.warmup_teacher_temp_epochs,
         args.epochs,
+        cos_loss=args.cos_loss,
     ).cuda()
 
     # ============ preparing optimizer ... ============
@@ -376,7 +380,7 @@ def train_dino(args):
         # ============ training one epoch of DINO ... ============
         train_stats = train_one_epoch(student, teacher, teacher_without_ddp, dino_loss,
             data_loader, optimizer, lr_schedule, wd_schedule, momentum_schedule,
-            epoch, fp16_scaler, args)
+            epoch, fp16_scaler, args, args.cos_loss)
 
         # ============ writing logs ... ============
         save_dict = {
@@ -405,7 +409,7 @@ def train_dino(args):
 
 def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loader,
                     optimizer, lr_schedule, wd_schedule, momentum_schedule,epoch,
-                    fp16_scaler, args):
+                    fp16_scaler, args, cos_loss=0):
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
     for it, (images, _) in enumerate(metric_logger.log_every(data_loader, 10, header)):
@@ -422,6 +426,9 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
         with torch.cuda.amp.autocast(fp16_scaler is not None):
             teacher_output = teacher(images[:2])  # only the 2 global views pass through the teacher
             student_output = student(images)
+            if cos_loss>0:
+                print(dir(student))
+                student_output = (student_output, student.backbone.leaf_outs)
             loss = dino_loss(student_output, teacher_output, epoch)
 
         if not math.isfinite(loss.item()):
@@ -468,12 +475,13 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
 class DINOLoss(nn.Module):
     def __init__(self, out_dim, ncrops, warmup_teacher_temp, teacher_temp,
                  warmup_teacher_temp_epochs, nepochs, student_temp=0.1,
-                 center_momentum=0.9):
+                 center_momentum=0.9, cos_loss=0):
         super().__init__()
         self.student_temp = student_temp
         self.center_momentum = center_momentum
         self.ncrops = ncrops
         self.register_buffer("center", torch.zeros(1, out_dim))
+        self.cos_loss = cos_loss
         # we apply a warm up for the teacher temperature because
         # a too high temperature makes the training instable at the beginning
         self.teacher_temp_schedule = np.concatenate((
@@ -486,6 +494,9 @@ class DINOLoss(nn.Module):
         """
         Cross-entropy between softmax outputs of the teacher and student networks.
         """
+        if self.cos_loss>0:
+            leaf_out = student_output[1]
+            student_output = student_output[0]
         student_out = student_output / self.student_temp
         student_out = student_out.chunk(self.ncrops)
 
@@ -506,6 +517,11 @@ class DINOLoss(nn.Module):
                 n_loss_terms += 1
         total_loss /= n_loss_terms
         self.update_center(teacher_output)
+        if self.cos_loss>0:
+            # leaf out (B,L,D)
+            alpha = self.cos_loss
+            cos_sim = get_cos_sims(leaf_out).mean()
+            total_loss = (1-alpha)*total_loss + alpha*cos_sim
         return total_loss
 
     @torch.no_grad()
@@ -520,6 +536,21 @@ class DINOLoss(nn.Module):
         # ema update
         self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
 
+def get_cos_sims(leaf_out, mask_diag=True):
+    """
+    Args:
+        leaf_out: torch tensor (B,L,D)
+    Returns:
+        cos_sims: torch tensor (B,L,L)
+    """
+    norms = torch.norm(leaf_out, dim=-1)
+    norms = norms[...,None].matmul(norms[:,None])
+    dots = leaf_out.matmul(leaf_out.permute(0,2,1))
+    cos_sims = dots/norms
+    if mask_diag:
+        mask = (1-torch.diag(torch.ones(cos_sims.shape[-1]))).bool()
+        cos_sims = cos_sims.masked_fill(mask, 0)
+    return cos_sims
 
 class DataAugmentationDINO(object):
     def __init__(self, global_crops_scale, local_crops_scale, local_crops_number, img_shape=(3,224,224)):

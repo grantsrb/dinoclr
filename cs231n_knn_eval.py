@@ -226,7 +226,7 @@ for checkpt_path in tqdm(checkpt_paths):
             elif type(args[key])==type((1,)): args[key] = str(args[key])
             df[key] = args[key]
         main_df = main_df.append(df, sort=True)
-        main_df.to_csv("knn_eval.csv", header=True, index=False, sep="!", mode="w")
+        main_df.to_csv(csv_file, header=True, index=False, sep="!", mode="w")
     except Exception as e:
         print(e.__class__)
         print(e.__traceback__.tb_frame)
