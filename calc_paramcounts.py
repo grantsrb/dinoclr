@@ -1,6 +1,7 @@
 import math
 import torch
 import numpy as np
+from models import AvgOverDim
 
 """
 This script takes a number of tree nets and determines a comparable
@@ -8,9 +9,9 @@ single network in terms of parameter counts.
 """
 
 baseline_chans = [
-    [8,16,32,48],
-    [16,32,64,96],
-    [32,64,128,192],
+    [8,16,32,48,64],
+    [16,32,64,96,116],
+    [32,64,128,192,256],
     [32,64,128,256,512],
 ]
 
@@ -23,12 +24,15 @@ hyps = {
     "paddings": 0,
     "lnorm": True,
     "h_size": 256,
-    #"agg_fxn": AvgOverDim,
+    "agg_fxn": AvgOverDim,
     "agg_dim": 128,
     "share_base": False,
     "seq_len": 4,
     "cls": True,
     "output_type": "gapooling",
+    "residual_convs": True,
+    "preagg_proj": True,
+    "postagg_proj": True,
 }
 
 def count_params(chans, h_size, ksize=2):

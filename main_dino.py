@@ -245,7 +245,7 @@ def train_dino(args):
             "output_type": args.output_type,
             "residual_convs": args.residual_convs,
             "proj_agg": args.proj_agg,
-            "postagg_proj": args.preagg_proj,
+            "preagg_proj": args.preagg_proj,
             "postagg_proj": args.postagg_proj,
         }
         student = models.__dict__[args.arch](**hyps)
