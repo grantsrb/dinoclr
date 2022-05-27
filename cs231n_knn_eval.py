@@ -7,8 +7,6 @@ knn_results.csv
  
 """
 
-csv_file = "/mnt/fs1/grantsrb/dinoclr_saves/knn_eval.csv"
-
 import torch
 import torchvision
 import torchvision.transforms as transforms
@@ -88,7 +86,7 @@ def predict_labels(ytrain, dists, k=1):
 
     return y_pred
 
-csv_file = "knn_eval.csv"
+csv_file = "/mnt/fs1/grantsrb/dinoclr_saves/knn_eval.csv"
 
 ext = "checkpoint.pth"
 paths = sys.argv[1:]
