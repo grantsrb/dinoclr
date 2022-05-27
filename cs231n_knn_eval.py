@@ -7,6 +7,8 @@ knn_results.csv
  
 """
 
+csv_file = "/mnt/fs1/grantsrb/dinoclr_saves/knn_eval.csv"
+
 import torch
 import torchvision
 import torchvision.transforms as transforms
@@ -136,7 +138,6 @@ y_test = torch.LongTensor( testset.targets)
 classes = ('plane', 'car', 'bird', 'cat',
            'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
 
-csv_file = "knn_eval.csv"
 if os.path.exists(csv_file):
     main_df = pd.read_csv(csv_file, sep="!")
 else:
