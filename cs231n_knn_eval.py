@@ -7,6 +7,8 @@ knn_results.csv
  
 """
 
+csv_file = "/mnt/fs1/grantsrb/dinoclr_saves/knn_eval.csv"
+
 import torch
 import torchvision
 import torchvision.transforms as transforms
