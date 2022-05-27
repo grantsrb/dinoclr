@@ -427,8 +427,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
             teacher_output = teacher(images[:2])  # only the 2 global views pass through the teacher
             student_output = student(images)
             if cos_loss>0:
-                print(dir(student))
-                student_output = (student_output, student.backbone.leaf_outs)
+                student_output = (student_output, student.module.backbone.leaf_outs)
             loss = dino_loss(student_output, teacher_output, epoch)
 
         if not math.isfinite(loss.item()):
@@ -548,7 +547,7 @@ def get_cos_sims(leaf_out, mask_diag=True):
     dots = leaf_out.matmul(leaf_out.permute(0,2,1))
     cos_sims = dots/norms
     if mask_diag:
-        mask = (1-torch.diag(torch.ones(cos_sims.shape[-1]))).bool()
+        mask = (1-torch.diag(torch.ones_like(cos_sims[0]))).bool()
         cos_sims = cos_sims.masked_fill(mask, 0)
     return cos_sims
 

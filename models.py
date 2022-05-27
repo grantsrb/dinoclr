@@ -666,6 +666,7 @@ class GroupedTreeCNN(nn.Module):
             outps = fx1*mask + fx2*(1-mask)
         else:
             outps = self.cnn(x) # (B, G, D)
+        self.leaf_outs = outps
         shape = outps.shape
         outps = self.pre_proj(outps.reshape(-1, outps.shape[-1]))
         agg = self.agg_fxn( outps.reshape(shape) )
