@@ -192,6 +192,7 @@ for checkpt_path in tqdm(checkpt_paths):
                 train_feats = get_features(model, X_train, step_size=bsize)
                 print("Getting test features")
                 test_feats = get_features(model, X_test, step_size=bsize)
+                failure = False
             except:
                 bsize = bsize//2
                 print("Error ocurred, reducing bsize to", bsize)
