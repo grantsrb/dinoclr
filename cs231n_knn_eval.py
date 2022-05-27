@@ -86,11 +86,17 @@ def predict_labels(ytrain, dists, k=1):
 
     return y_pred
 
+csv_file = "knn_eval.csv"
+
 ext = "checkpoint.pth"
 paths = sys.argv[1:]
 checkpt_paths = []
 for path in paths:
-    if not os.path.exists(path):
+    if ".csv" in path:
+        csv_file = path
+        print("saving to", csv_file)
+        continue
+    elif not os.path.exists(path):
         print(path, "does not exist")
         continue
     if not os.path.isdir(path) and ext in path:
@@ -136,7 +142,6 @@ y_test = torch.LongTensor( testset.targets)
 classes = ('plane', 'car', 'bird', 'cat',
            'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
 
-csv_file = "knn_eval.csv"
 if os.path.exists(csv_file):
     main_df = pd.read_csv(csv_file, sep="!")
 else:
