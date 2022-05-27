@@ -124,7 +124,8 @@ class ResBlock(nn.Module):
                lnorm: bool=True,
                actv_layer=nn.ReLU,
                drop: float=0,
-               groups: int=1):
+               groups: int=1,
+               max_pool: bool=False):
         """
         chan_in: int
         chan_out: int
@@ -169,10 +170,12 @@ class ResBlock(nn.Module):
             residual=False
         )
         self.norm = nn.GroupNorm(groups,chan_out)
+        self.max_pool = NullOp()
+        if max_pool: self.max_pool = nn.MaxPool2d(2)
 
     def forward(self, x):
         fx = self.proj(x)
-        return self.norm(fx + self.conv2(self.conv1(fx)))
+        return self.max_pool(self.norm(fx + self.conv2(self.conv1(fx))))
 
 def conv_block(chan_in: int,
                chan_out: int,
@@ -183,7 +186,8 @@ def conv_block(chan_in: int,
                actv_layer=nn.ReLU,
                drop: float=0,
                groups: int=1,
-               residual=False):
+               residual=False,
+               max_pool=False):
     """
     Args:
         chan_in: int
@@ -199,6 +203,7 @@ def conv_block(chan_in: int,
             the number of independent convolutions within the layer
         residual: bool
             if true, uses residual style connections
+        max_pool: bool
     """
     if residual:
         return ResBlock(
@@ -210,7 +215,8 @@ def conv_block(chan_in: int,
             lnorm=lnorm,
             actv_layer=actv_layer,
             drop=drop,
-            groups=groups
+            groups=groups,
+            max_pool=max_pool
         )
     modules = []
     if lnorm:
@@ -230,6 +236,7 @@ def conv_block(chan_in: int,
     if drop > 0:
         modules.append( nn.Dropout(drop) )
     modules.append( actv_layer() )
+    if max_pool: modules.append( nn.MaxPool2d(2) )
     return nn.Sequential( *modules )
 
 
@@ -394,6 +401,7 @@ class GroupedCNN(nn.Module):
                        cls=True,
                        groups=1,
                        residual_convs=False,
+                       max_pool=False,
                        *args, **kwargs):
         """
         Simple CNN architecture
@@ -431,6 +439,9 @@ class GroupedCNN(nn.Module):
                     "alt_attn": alternating attention
             residual_convs: bool
                 resnet style convolutions
+            max_pool: bool
+                if true, the cnns include a max pooling layer after
+                each convolution after the first 3 layers
         """
         super().__init__()
         self.inpt_shape = inpt_shape
@@ -458,6 +469,7 @@ class GroupedCNN(nn.Module):
         self.groups = groups
         self.output_type = output_type.lower()
         self.residual_convs = residual_convs
+        self.max_pool = max_pool
 
         # Conv Layers
         self.shapes = [ inpt_shape[-2:] ]
@@ -473,7 +485,8 @@ class GroupedCNN(nn.Module):
                 lnorm=self.lnorm and i!=0,
                 drop=self.drop,
                 groups=self.groups if i > 0 else 1,
-                residual=i>0 and self.residual_convs
+                residual=i>0 and self.residual_convs,
+                max_pool=self.max_pool and i>2
             ))
             self.shapes.append( update_shape(
                 self.shapes[-1],
@@ -597,6 +610,9 @@ class GroupedTreeCNN(nn.Module):
             postagg_proj: bool
                 if true, the aggregated output is processed by a proj
                 layer
+            max_pool: bool
+                if true, the cnns include a max pooling layer after
+                each convolution
         """
         super().__init__()
         if "agg_dim" not in kwargs: kwargs["agg_dim"]=kwargs["out_dim"]

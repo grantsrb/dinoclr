@@ -60,6 +60,7 @@ def get_args_parser():
     parser.add_argument('--lnorm', default="True", type=str)
     parser.add_argument('--h_size', default=64, type=int)
     parser.add_argument('--residual_convs', default=False, type=bool)
+    parser.add_argument('--max_pool', default=False, type=bool)
     parser.add_argument('--proj_agg', default=False, type=bool,
         help="""deprecated in favor of preagg_proj""")
     parser.add_argument('--preagg_proj', default=False, type=bool,
