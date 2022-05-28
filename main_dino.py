@@ -518,9 +518,8 @@ class DINOLoss(nn.Module):
         self.update_center(teacher_output)
         if self.cos_loss>0:
             # leaf out (B,L,D)
-            alpha = self.cos_loss
             cos_sim = get_cos_sims(leaf_out).mean()
-            total_loss = (1-alpha)*total_loss + alpha*cos_sim
+            total_loss = total_loss + self.cos_loss*cos_sim
         return total_loss
 
     @torch.no_grad()
