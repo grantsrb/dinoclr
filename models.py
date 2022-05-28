@@ -1077,17 +1077,19 @@ class ResNet50(nn.Module):
             resnet.conv1,
             resnet.bn1,
             resnet.relu,
-            resnet.maxpool,
             resnet.layer1,
-            resnet.layer2
+            resnet.layer2,
+            resnet.layer3,
+            resnet.layer4,
         )
         self.agg_dim = agg_dim
-        self.agg_fxn_str = agg_fxn
-        self.agg_fxn = globals()[agg_fxn](**kwargs)
+        self.agg_fxn_str = "AvgOverDim"
+        self.agg_fxn = globals()[self.agg_fxn_str](**kwargs)
 
         # Make MLP
+        ressize = 2048
         self.dense = get_mlp(
-            in_size=512,
+            in_size=ressize,
             h_size=self.h_size,
             n_layers=self.n_outlayers,
             out_size=self.agg_dim,
@@ -1095,7 +1097,7 @@ class ResNet50(nn.Module):
         )
         self.net = nn.Sequential(
             self.features,
-            Reshape((512,-1)),
+            Reshape((ressize,-1)),
             Transpose((0,2,1)),
             self.agg_fxn,
             Flatten(),
