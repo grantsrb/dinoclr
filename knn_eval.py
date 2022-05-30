@@ -254,7 +254,6 @@ for checkpt_path in tqdm(checkpt_paths):
         except:
             bsize = bsize//2
             print("Error ocurred, reducing bsize to", bsize)
-    print(train_feats)
     for layer in train_feats:
         with torch.no_grad():
             print("Computing distances -- layer", layer)
