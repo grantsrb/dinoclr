@@ -546,7 +546,7 @@ def get_cos_sims(leaf_out, mask_diag=True):
     dots = leaf_out.matmul(leaf_out.permute(0,2,1))
     cos_sims = dots/norms
     if mask_diag:
-        mask = torch.zeros_like(cos_map[0])
+        mask = torch.zeros_like(cos_sims[0])
         idxs = torch.arange(len(mask)).long()
         mask[idxs,idxs] = 1
         cos_sims = cos_sims.masked_fill(mask.bool(), 0)
