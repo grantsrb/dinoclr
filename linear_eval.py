@@ -32,22 +32,38 @@ font = {'family' : 'normal',
 import matplotlib
 matplotlib.rc('font', **font)
 
-def get_features(model, train_data, step_size=300, layer_name="backbone"):
+def get_hook(out_dict, key):
+    def hook(module, ins, out):
+        out_dict[key] = out.cpu().detach()
+    return hook
+
+def get_features(model, train_data, step_size=300, layers={"backbone"}):
     outs = {}
-    def hook(modu, inps, oupts):
-        outs[layer_name] = oupts.cpu().detach().data
+    feats = {}
+    handles = []
     for name,modu in model.named_modules():
-        if layer_name == name:
+        if name in layers or layers=="all":
+            hook = get_hook(outs, name)
             handle = modu.register_forward_hook(hook)
-            break
+            handles.append(handle)
+
     model.eval()
-    feats = []
     with torch.no_grad():
         for i in tqdm(range(0, len(train_data), step_size)):
             _ = model(train_data[i:i+step_size].cuda())
-            feats.append(outs[layer_name])
-    handle.remove()
-    return torch.cat(feats, dim=0)
+            for k in outs:
+                if k in feats:
+                    feats[k].append(outs[k])
+                else:
+                    feats[k] = [outs[k]]
+    for handle in handles:
+        handle.remove()
+    del handles
+    keys = list(feats.keys())
+    for k in keys:
+        if len(feats[k]) > 0: feats[k] = torch.cat(feats[k],dim=0)
+        else: del feats[k]
+    return feats
 
 
 def train_linear_classifier(Xtrain, ytrain, batch_size=2000, lr=1e-2):
@@ -196,7 +212,8 @@ for checkpt_path in tqdm(checkpt_paths):
         continue
     print("\nBeginning evaluation for", checkpt_path)
     
-    df = dict()
+    max_k = 5
+    df = {**{"acc":[],"layer":[], "loss": []} **{"top_"+str(k):[] for k in range(1,max_k+1)}}
     try:
         checkpt = torch.load(checkpt_path, map_location='cpu')
         args = checkpt["args"]
@@ -240,9 +257,11 @@ for checkpt_path in tqdm(checkpt_paths):
                 else:
                     new_sd[k] = checkpt["teacher"][k]
             model.load_state_dict(new_sd)
-        layer_name = "backbone"
 
+        layers = {"agg_fxn.dense.1"}
+        model = model.backbone
         model.eval()
+        model.cuda()
         torch.cuda.empty_cache()
         
         failure = True
@@ -254,7 +273,7 @@ for checkpt_path in tqdm(checkpt_paths):
                     model.cuda(),
                     X_train,
                     step_size=bsize,
-                    layer_name=layer_name
+                    layers=layers
                 )
                 print("train_feats:", train_feats.shape)
                 print("Getting test features")
@@ -262,7 +281,7 @@ for checkpt_path in tqdm(checkpt_paths):
                     model.cuda(),
                     X_test,
                     step_size=bsize,
-                    layer_name=layer_name
+                    layers=layers
                 )
                 failure = False
             except:
@@ -271,37 +290,39 @@ for checkpt_path in tqdm(checkpt_paths):
         model.cpu()
         torch.cuda.empty_cache()
 
-        failure = True
-        bsize = 256
-        while failure and bsize > 10:
-            try:
-                print("training linear classifier")
-                print("trainfeats:", train_feats.shape)
-                proj, loss = train_linear_classifier(train_feats, y_train, bsize)
-                print("Linear Loss:", loss)
-                print()
-                failure = False
-            except:
-                bsize = bsize//2
-                print("Error ocurred, reducing bsize to", bsize)
-
-        with torch.no_grad():
-            print("Predicting labels")
+        for layer in train_feats:
             failure = True
-            bsize = len(X_test)
+            bsize = 256
             while failure and bsize > 10:
                 try:
-                    preds = predict(proj, test_feats, batch_size=bsize)
+                    print("training linear classifier")
+                    print("trainfeats:", train_feats.shape)
+                    proj, loss = train_linear_classifier(train_feats, y_train, bsize)
+                    print("Linear Loss:", loss)
+                    print()
                     failure = False
                 except:
                     bsize = bsize//2
                     print("Error ocurred, reducing bsize to", bsize)
-            accs = get_accs(preds, y_test.numpy(), top_k=5)
-            print("Acc:", accs)
-        for k in accs:
-            df["top_"+str(k)] = [accs[k]]
-        df["acc"] = [accs[1]]
-        df["loss"] = [loss]
+
+            with torch.no_grad():
+                print("Predicting labels")
+                failure = True
+                bsize = len(X_test)
+                while failure and bsize > 10:
+                    try:
+                        preds = predict(proj, test_feats, batch_size=bsize)
+                        failure = False
+                    except:
+                        bsize = bsize//2
+                        print("Error ocurred, reducing bsize to", bsize)
+                accs = get_accs(preds, y_test.numpy(), top_k=max_k)
+                print("Acc:", accs)
+            for k in accs:
+                df["top_"+str(k)].append(accs[k])
+            df["acc"].append(accs[1])
+            df["loss"].append(loss)
+            df["layer"].append(layer)
         df = pd.DataFrame(df)
         df["folder"] = checkpt_path
         df["param_count"] = param_count
