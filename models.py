@@ -340,6 +340,11 @@ class CNN(nn.Module):
             modules.append( AvgOverDim(-1) )
             self.flat_dim = self.chans[-1]
             in_dim = self.flat_dim
+        elif self.output_type == "gmpooling":
+            modules.append( Reshape((self.chans[-1],-1)) )
+            modules.append( MaxOverDim(-1) )
+            self.flat_dim = self.chans[-1]
+            in_dim = self.flat_dim
         elif self.output_type == "attention":
             modules.append( Reshape((self.chans[-1], -1)) )
             modules.append( Transpose((0,2,1)) )
@@ -456,7 +461,7 @@ class GroupedCNN(nn.Module):
         if isinstance(strides, int):
             self.strides = [strides for i in range(len(chans))]
             if self.inpt_shape[1] > 32 and not is_base:
-                for i in range(min(len(self.strides), 3)):
+                for i in range(1,min(len(self.strides)+1, 4)):
                     self.strides[-i] = 2
                 print("changing striedes to accomodate larger image")
                 print("strides:", self.strides)
@@ -506,6 +511,14 @@ class GroupedCNN(nn.Module):
             else:
                 modules.append( Reshape((n_chans,-1)) )
             modules.append( AvgOverDim(-1) )
+            self.flat_dim = n_chans*self.groups
+            in_dim = self.flat_dim
+        if self.output_type == "gmpooling":
+            if self.groups>1:
+                modules.append( Reshape((self.groups,n_chans,-1)) )
+            else:
+                modules.append( Reshape((n_chans,-1)) )
+            modules.append( MaxOverDim(-1) )
             self.flat_dim = n_chans*self.groups
             in_dim = self.flat_dim
         elif self.output_type == "attention":
@@ -777,6 +790,25 @@ class AvgOverDim(nn.Module):
                 the average over the specified dim
         """
         return x.mean(self.dim)
+
+
+class MaxOverDim(nn.Module):
+    """
+    Takes the maximum value over the specified dimension
+    """
+    def __init__(self, dim=1, *args, **kwargs):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, x):
+        """
+        Args:
+            x: torch FloatTensor (..., dim_n, spec_dim, ...)
+        Returns:
+            max: torch FloatTensor (..., dim_n, ...)
+                the max over the specified dim
+        """
+        return x.max(self.dim)[0]
 
 
 class Attention(nn.Module):
