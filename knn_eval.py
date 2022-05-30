@@ -31,14 +31,40 @@ font = {'family' : 'normal',
 import matplotlib
 matplotlib.rc('font', **font)
 
-def get_features(model, train_data, step_size=300):
+
+def get_hook(out_dict, key):
+    def hook(module, ins, out):
+        out_dict[key] = out.cpu().detach()
+    return hook
+
+def get_features(model, train_data, step_size=300, layers={"backbone"}):
+    outs = {}
+    feats = {}
+    handles = []
+    for name,modu in model.named_modules():
+        if name in layers or layers=="all":
+            hook = get_hook(outs, name)
+            handle = modu.register_forward_hook(hook)
+            handles.append(handle)
+
     model.eval()
-    feats = []
     with torch.no_grad():
         for i in tqdm(range(0, len(train_data), step_size)):
-            f = model(train_data[i:i+step_size].cuda())
-            feats.append(f.detach().cpu().data)
-    return torch.cat(feats, dim=0)
+            _ = model(train_data[i:i+step_size].cuda())
+            for k in outs:
+                if k in feats:
+                    feats[k].append(outs[k])
+                else:
+                    feats[k] = [outs[k]]
+    for handle in handles:
+        handle.remove()
+    del handles
+    keys = list(feats.keys())
+    for k in keys:
+        if len(feats[k]) > 0: feats[k] = torch.cat(feats[k],dim=0)
+        else: del feats[k]
+    return feats
+
 
 def compute_distances_no_loops(X_train, X):
         """
@@ -160,7 +186,7 @@ for checkpt_path in tqdm(checkpt_paths):
         continue
     print("\nBeginning evaluation for", checkpt_path)
     
-    df = dict()
+    df = {"acc":[],"k":[],"layer":[]}
     checkpt = torch.load(checkpt_path, map_location='cpu')
     args = checkpt["args"]
     if args.arch in vits.__dict__.keys():                                  
@@ -204,34 +230,48 @@ for checkpt_path in tqdm(checkpt_paths):
                 new_sd[k] = checkpt["teacher"][k]
         model.load_state_dict(new_sd)
 
+    layers = {"agg_fxn.dense.1","agg_fxn.dense.4","agg_fxn.dense.7"}
+    model = model.backbone
     model.eval()
     model.cuda()
     torch.cuda.empty_cache()
     
     failure = True
-    bsize = 500
+    bsize = 750
     while failure and bsize > 10:
         try:
             print("Getting train features")
-            train_feats = get_features(model, X_train, step_size=bsize)
-            print("Getting test features")
-            test_feats = get_features(model, X_test, step_size=bsize)
+            with torch.no_grad():
+                train_feats = get_features(
+                    model,
+                    X_train,
+                    step_size=bsize,
+                    layers=layers
+                    )
+                print("Getting test features")
+                test_feats = get_features(model, X_test, step_size=bsize, layers=layers)
             failure = False
         except:
             bsize = bsize//2
             print("Error ocurred, reducing bsize to", bsize)
-    with torch.no_grad():
-        print("Computing distances")
-        dists = compute_distances_no_loops(train_feats.cpu().data.numpy(), test_feats.cpu().data.numpy())
-        
-    accs = []
-    ks = list(range(17,20))
-    print("Predicting Labels")
-    for k in tqdm(ks):
-        preds = predict_labels(y_train, dists, k=k)
-        accs.append((preds == y_test.numpy()).mean())
-    df["acc"] = accs
-    df["k"] = ks
+    print(train_feats)
+    for layer in train_feats:
+        with torch.no_grad():
+            print("Computing distances -- layer", layer)
+            dists = compute_distances_no_loops(
+                train_feats[layer].cpu().data.numpy(),
+                test_feats[layer].cpu().data.numpy()
+            )
+            
+        accs = []
+        ks = list(range(15,20))
+        print("Predicting Labels")
+        for k in tqdm(ks):
+            preds = predict_labels(y_train.numpy(), dists, k=k)
+            df["acc"].append((preds == y_test.numpy()).mean())
+            df["k"].append(k)
+            df["layer"].append(layer)
+            print("Top", k, "-", df["acc"][-1])
     df = pd.DataFrame(df)
     df["folder"] = checkpt_path
     df["param_count"] = param_count

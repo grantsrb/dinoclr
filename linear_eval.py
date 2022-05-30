@@ -165,7 +165,7 @@ def unnormalize(X):
 
 batch_size = 4
 
-dataset = "cifar100"
+dataset = "cifar10"
 if dataset == "cifar10":
     trainset = torchvision.datasets.CIFAR10(root='./data', train=True,
                                             download=True, transform=transform)
