@@ -73,7 +73,7 @@ def get_args_parser():
         help="""if true, adds a projection layer to the output of
         the aggregation function""")
     parser.add_argument('--output_type', default="gapooling", type=str,
-        choices=['gapooling', "alt_attn", "attention"],
+        choices=['gapooling', "alt_attn", "attention", "gmpooling"],
         help="""the feature aggregation function for the leaf cnns""")
     parser.add_argument('--seq_len', default=4, type=int,
         help="""the sequence length for recurrent attention agg fxn""")
@@ -84,7 +84,7 @@ def get_args_parser():
         help="""all cnns share the first 2 layers""")
     parser.add_argument('--agg_fxn', default="AvgOverDim", type=str, 
         choices=['AvgOverDim', 'AttentionalJoin', "RecurrentAttention",
-                "DenseJoin"],
+                "DenseJoin", "MaxOverDim"],
         help="""The name of the aggregation function defined in models.py""")
     parser.add_argument('--patch_size', default=16, type=int, help="""Size in pixels
         of input square patches - default 16 (for 16x16 patches). Using smaller
@@ -546,8 +546,10 @@ def get_cos_sims(leaf_out, mask_diag=True):
     dots = leaf_out.matmul(leaf_out.permute(0,2,1))
     cos_sims = dots/norms
     if mask_diag:
-        mask = (1-torch.diag(torch.ones_like(cos_sims[0]))).bool()
-        cos_sims = cos_sims.masked_fill(mask, 0)
+        mask = torch.zeros_like(cos_map[0])
+        idxs = torch.arange(len(mask)).long()
+        mask[idxs,idxs] = 1
+        cos_sims = cos_sims.masked_fill(mask.bool(), 0)
     return cos_sims
 
 class DataAugmentationDINO(object):
