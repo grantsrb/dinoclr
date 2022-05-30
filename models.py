@@ -513,7 +513,7 @@ class GroupedCNN(nn.Module):
             modules.append( AvgOverDim(-1) )
             self.flat_dim = n_chans*self.groups
             in_dim = self.flat_dim
-        if self.output_type == "gmpooling":
+        elif self.output_type == "gmpooling":
             if self.groups>1:
                 modules.append( Reshape((self.groups,n_chans,-1)) )
             else:
