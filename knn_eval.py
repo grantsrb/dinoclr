@@ -230,7 +230,8 @@ for checkpt_path in tqdm(checkpt_paths):
                 new_sd[k] = checkpt["teacher"][k]
         model.load_state_dict(new_sd)
 
-    layers = {"agg_fxn.dense.1","agg_fxn.dense.4","agg_fxn.dense.7"}
+    #layers = {"cnn.net", "agg_fxn.dense.1","agg_fxn.dense.4","agg_fxn.dense.7"}
+    layers = {"cnn.net"}
     model = model.backbone
     model.eval()
     model.cuda()
@@ -249,12 +250,21 @@ for checkpt_path in tqdm(checkpt_paths):
                     layers=layers
                     )
                 print("Getting test features")
-                test_feats = get_features(model, X_test, step_size=bsize, layers=layers)
+                test_feats = get_features(
+                    model, X_test, step_size=bsize, layers=layers
+                )
             failure = False
         except:
             bsize = bsize//2
             print("Error ocurred, reducing bsize to", bsize)
     for layer in train_feats:
+
+        if len(train_feats[layer].shape) > 2:
+            l = len(train_feats[layer])
+            train_feats[layer] = train_feats[layer].reshape(l,-1)
+            l = len(test_feats[layer])
+            test_feats[layer] = test_feats[layer].reshape(l,-1)
+
         with torch.no_grad():
             print("Computing distances -- layer", layer)
             dists = compute_distances_no_loops(

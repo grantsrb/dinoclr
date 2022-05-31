@@ -213,132 +213,151 @@ for checkpt_path in tqdm(checkpt_paths):
     print("\nBeginning evaluation for", checkpt_path)
     
     max_k = 5
-    df = {**{"acc":[],"layer":[], "loss": []} **{"top_"+str(k):[] for k in range(1,max_k+1)}}
-    try:
-        checkpt = torch.load(checkpt_path, map_location='cpu')
-        args = checkpt["args"]
-        if args.arch in vits.__dict__.keys():                                  
-            hyps = {                                                           
-                "patch_size": args.patch_size,                                 
-                "img_size": [32]
-            }                                                                  
-            teacher = vits.__dict__[args.arch]( **hyps )                       
-            embed_dim = teacher.embed_dim
-        elif args.arch in models.__dict__.keys():                              
-            try:
-                hyps = checkpt["hyps"]
-            except:
-                hyps = {
-                    "n_cnns": 8, "inpt_shape": (3,32,32), "chans": [8,16,24,48,96],
-                    "ksizes": 2, "strides": 1, "paddings": 0, "lnorm": True, "out_dim": 65536,
-                }                                                                  
-            teacher = models.__dict__[args.arch](**hyps)                       
-            embed_dim = hyps["agg_dim"] if "out_dim" not in hyps else hyps["out_dim"] 
-        model = utils.MultiCropWrapper(                                      
-            teacher,                                                           
-            DINOHead(embed_dim, args.out_dim, False),            
-        )
-        param_count = 0
-        for p in teacher.parameters():
-            param_count += math.prod(p.shape)
-        wrapper_count = 0
-        for p in model.parameters():
-            wrapper_count += math.prod(p.shape)
-        print("Param Count", param_count)
-        print("Wrapper Count", wrapper_count)
+    df = {
+        **{"acc":[],"layer":[], "loss": []},
+        **{"top_"+str(k):[] for k in range(1,max_k+1)}
+    }
+    #try:
+    checkpt = torch.load(checkpt_path, map_location='cpu')
+    args = checkpt["args"]
+    if args.arch in vits.__dict__.keys():                                  
+        hyps = {                                                           
+            "patch_size": args.patch_size,                                 
+            "img_size": [32]
+        }                                                                  
+        teacher = vits.__dict__[args.arch]( **hyps )                       
+        embed_dim = teacher.embed_dim
+    elif args.arch in models.__dict__.keys():                              
         try:
-            model.load_state_dict(checkpt["teacher"])
+            hyps = checkpt["hyps"]
         except:
-            new_sd = dict()
-            for k in checkpt["teacher"]:
-                if "module" in k:
-                    k2 = ".".join(k.split(".")[1:])
-                    new_sd[k2] = checkpt["teacher"][k]
-                else:
-                    new_sd[k] = checkpt["teacher"][k]
-            model.load_state_dict(new_sd)
+            hyps = {
+                "n_cnns": 8, "inpt_shape": (3,32,32), "chans": [8,16,24,48,96],
+                "ksizes": 2, "strides": 1, "paddings": 0, "lnorm": True, "out_dim": 65536,
+            }                                                                  
+        teacher = models.__dict__[args.arch](**hyps)                       
+        embed_dim = hyps["agg_dim"] if "out_dim" not in hyps else hyps["out_dim"] 
+    model = utils.MultiCropWrapper(                                      
+        teacher,                                                           
+        DINOHead(embed_dim, args.out_dim, False),            
+    )
+    param_count = 0
+    for p in teacher.parameters():
+        param_count += math.prod(p.shape)
+    wrapper_count = 0
+    for p in model.parameters():
+        wrapper_count += math.prod(p.shape)
+    print("Param Count", param_count)
+    print("Wrapper Count", wrapper_count)
+    try:
+        model.load_state_dict(checkpt["teacher"])
+    except:
+        new_sd = dict()
+        for k in checkpt["teacher"]:
+            if "module" in k:
+                k2 = ".".join(k.split(".")[1:])
+                new_sd[k2] = checkpt["teacher"][k]
+            else:
+                new_sd[k] = checkpt["teacher"][k]
+        model.load_state_dict(new_sd)
 
-        layers = {"agg_fxn.dense.1"}
-        model = model.backbone
-        model.eval()
-        model.cuda()
-        torch.cuda.empty_cache()
-        
+    layers = {"cnn.net", "agg_fxn.dense.1", "agg_fxn.dense.4", "backbone"}
+    model = model.backbone
+    model.eval()
+    model.cuda()
+    torch.cuda.empty_cache()
+
+    #X_train = X_train[:100]
+    #y_train = y_train[:100]
+    #X_test = X_test[:100]
+    #y_test = y_test[:100]
+    
+    failure = True
+    bsize = 750
+    while failure and bsize >= 5:
+        try:
+            print("Getting train features")
+            train_feats = get_features(
+                model.cuda(),
+                X_train,
+                step_size=bsize,
+                layers=layers
+            )
+            print("Getting test features")
+            test_feats = get_features(
+                model.cuda(),
+                X_test,
+                step_size=bsize,
+                layers=layers
+            )
+            failure = False
+        except:
+            bsize = bsize//2
+            print("Error ocurred, reducing bsize to", bsize)
+    model.cpu()
+    torch.cuda.empty_cache()
+
+    for layer in train_feats:
+        if len(train_feats[layer].shape) > 2:
+            l = len(train_feats[layer])
+            train_feats[layer] = train_feats[layer].reshape(l,-1)
+            l = len(test_feats[layer])
+            test_feats[layer] = test_feats[layer].reshape(l,-1)
         failure = True
-        bsize = 2000
+        bsize = 256
         while failure and bsize > 10:
             try:
-                print("Getting train features")
-                train_feats = get_features(
-                    model.cuda(),
-                    X_train,
-                    step_size=bsize,
-                    layers=layers
+                print("training linear classifier")
+                proj, loss = train_linear_classifier(
+                    train_feats[layer],
+                    y_train,
+                    bsize
                 )
-                print("train_feats:", train_feats.shape)
-                print("Getting test features")
-                test_feats = get_features(
-                    model.cuda(),
-                    X_test,
-                    step_size=bsize,
-                    layers=layers
-                )
+                print("Linear Loss:", loss)
                 failure = False
             except:
                 bsize = bsize//2
                 print("Error ocurred, reducing bsize to", bsize)
-        model.cpu()
-        torch.cuda.empty_cache()
 
-        for layer in train_feats:
+        with torch.no_grad():
+            print("Predicting labels")
             failure = True
-            bsize = 256
+            bsize = len(X_test)
             while failure and bsize > 10:
                 try:
-                    print("training linear classifier")
-                    print("trainfeats:", train_feats.shape)
-                    proj, loss = train_linear_classifier(train_feats, y_train, bsize)
-                    print("Linear Loss:", loss)
-                    print()
+                    preds = predict(
+                        proj,
+                        test_feats[layer],
+                        batch_size=bsize
+                    )
                     failure = False
                 except:
                     bsize = bsize//2
                     print("Error ocurred, reducing bsize to", bsize)
-
-            with torch.no_grad():
-                print("Predicting labels")
-                failure = True
-                bsize = len(X_test)
-                while failure and bsize > 10:
-                    try:
-                        preds = predict(proj, test_feats, batch_size=bsize)
-                        failure = False
-                    except:
-                        bsize = bsize//2
-                        print("Error ocurred, reducing bsize to", bsize)
-                accs = get_accs(preds, y_test.numpy(), top_k=max_k)
-                print("Acc:", accs)
-            for k in accs:
-                df["top_"+str(k)].append(accs[k])
-            df["acc"].append(accs[1])
-            df["loss"].append(loss)
-            df["layer"].append(layer)
-        df = pd.DataFrame(df)
-        df["folder"] = checkpt_path
-        df["param_count"] = param_count
-        df["wrapper_count"] = wrapper_count-param_count
-        df["dataset"] = dataset
-        for key in hyps.keys():
-            if type(hyps[key])==type([]): hyps[key] = str(hyps[key])
-            df[key] = hyps[key]
-        args = vars(args)
-        for key in args.keys():
-            if type(args[key])==type([]): args[key] = str(args[key])
-            elif type(args[key])==type((1,)): args[key] = str(args[key])
-            df[key] = args[key]
-        main_df = main_df.append(df, sort=True)
-        main_df.to_csv(csv_file, header=True, index=False, sep="!", mode="w")
-    except Exception as e:
-        print(e.__class__)
-        print(e.__traceback__.tb_frame)
-        print("Error ocurred for", checkpt_path,"-- failed to record results")
+            accs = get_accs(preds, y_test.numpy(), top_k=max_k)
+            print("Layer:", layer, "| Acc:", accs)
+            print()
+        for k in accs:
+            df["top_"+str(k)].append(accs[k])
+        df["acc"].append(accs[1])
+        df["loss"].append(loss)
+        df["layer"].append(layer)
+    df = pd.DataFrame(df)
+    df["folder"] = checkpt_path
+    df["param_count"] = param_count
+    df["wrapper_count"] = wrapper_count-param_count
+    df["dataset"] = dataset
+    for key in hyps.keys():
+        if type(hyps[key])==type([]): hyps[key] = str(hyps[key])
+        df[key] = hyps[key]
+    args = vars(args)
+    for key in args.keys():
+        if type(args[key])==type([]): args[key] = str(args[key])
+        elif type(args[key])==type((1,)): args[key] = str(args[key])
+        df[key] = args[key]
+    main_df = main_df.append(df, sort=True)
+    main_df.to_csv(csv_file, header=True, index=False, sep="!", mode="w")
+    #except Exception as e:
+    #    print(e.__class__)
+    #    print(e.__traceback__.tb_frame)
+    #    print("Error ocurred for", checkpt_path,"-- failed to record results")
