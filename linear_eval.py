@@ -161,12 +161,6 @@ print("Searching over checkpts:")
 for checkpt in sorted(checkpt_paths):
     print(checkpt)
 
-transform = transforms.Compose([
-    transforms.ToTensor(),
-    #transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-    transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
-])
-
 def unnormalize(X):
     """
     X: torch tensor or ndarray (..., 3, H, W)
@@ -179,7 +173,11 @@ def unnormalize(X):
         stds = torch.FloatTensor([0.229, 0.224, 0.225])
     return X*stds[:,None,None] + means[:,None,None]
 
-batch_size = 4
+transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+    #transforms.Resize((32,32)),
+])
 
 dataset = "cifar10"
 if dataset == "cifar10":
@@ -261,8 +259,14 @@ for checkpt_path in tqdm(checkpt_paths):
                 new_sd[k] = checkpt["teacher"][k]
         model.load_state_dict(new_sd)
 
-    layers = {"cnn.net", "agg_fxn.dense.1", "agg_fxn.dense.4", "backbone"}
-    model = model.backbone
+    layers = {
+        "backbone.cnn.net",
+        "backbone.agg_fxn.dense.1",
+        "backbone.agg_fxn.dense.4",
+        "backbone",
+        "head.mlp",
+        "head.mlp.0",
+        "head.mlp.2"}
     model.eval()
     model.cuda()
     torch.cuda.empty_cache()
@@ -283,6 +287,7 @@ for checkpt_path in tqdm(checkpt_paths):
                 step_size=bsize,
                 layers=layers
             )
+            print("Collected layers:", list(train_feats.keys()))
             print("Getting test features")
             test_feats = get_features(
                 model.cuda(),
