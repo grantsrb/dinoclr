@@ -37,7 +37,7 @@ def get_hook(out_dict, key):
         out_dict[key] = out.cpu().detach()
     return hook
 
-def get_features(model, data, step_size=300, layers={"backbone"}):
+def get_features(model, data, step_size=300, layers={"backbone", "preds"}):
     """
     Args:
         model: nn module
@@ -45,10 +45,12 @@ def get_features(model, data, step_size=300, layers={"backbone"}):
         step_size: int
             the data processing step size to avoid cuda memory issues
         layers: set of str
-            the names of the layers that you would like to collect
+            the names of the layers that you would like to collect.
+            add the argument "preds" to collect the model outputs
     """
     outs = {}
-    feats = {"preds":[]}
+    feats = {}
+    if "preds" in layers: feats["preds"] = []
     handles = []
     for name,modu in model.named_modules():
         if name in layers or layers=="all":
@@ -60,7 +62,8 @@ def get_features(model, data, step_size=300, layers={"backbone"}):
     with torch.no_grad():
         for i in tqdm(range(0, len(data), step_size)):
             preds = model(data[i:i+step_size].cuda())
-            feats["preds"].append(preds.cpu().detach().data)
+            if "preds" in feats:
+                feats["preds"].append(preds.cpu().detach().data)
             for k in outs:
                 if k in feats:
                     feats[k].append(outs[k])
